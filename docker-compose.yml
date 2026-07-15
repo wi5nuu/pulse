@@ -1,0 +1,71 @@
+# Pulse — local development infrastructure.
+# Hanya Postgres + Redis di sini saat dev; server (Go) & web (Next.js)
+# dijalankan langsung di luar compose supaya dapat hot-reload.
+# Untuk demo end-to-end (Tier 3), profile `fullstack` bisa ditambahkan nanti.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pulse-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pulse
+      POSTGRES_PASSWORD: pulse
+      POSTGRES_DB: pulse
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulse -d pulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - pulse-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: pulse-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - pulse-net
+
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: pulse-server
+    restart: unless-stopped
+    ports:
+      - "9000:8080"
+    environment:
+      PULSE_ENV: dev
+      DATABASE_URL: postgres://pulse:pulse@postgres:5432/pulse?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: change-me-to-a-random-string-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - pulse-net
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  pulse-net:
+    driver: bridge

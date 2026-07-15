@@ -1,0 +1,105 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-white text-gray-900 antialiased;
+    font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center rounded px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-accent-600 text-white hover:bg-accent-700 active:bg-accent-800;
+  }
+  .btn-secondary {
+    @apply btn border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 active:bg-gray-100;
+  }
+  .btn-ghost {
+    @apply btn text-gray-600 hover:bg-gray-100 active:bg-gray-200;
+  }
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700 active:bg-red-800;
+  }
+  .input {
+    @apply w-full rounded border border-gray-300 px-3 py-2 text-sm placeholder-gray-400 focus:border-accent-500 focus:outline-none focus:ring-1 focus:ring-accent-500;
+  }
+  .label {
+    @apply block text-sm font-medium text-gray-700 mb-1;
+  }
+  .card {
+    @apply rounded border border-gray-200 bg-white p-4;
+  }
+  .skeleton {
+    @apply animate-pulse rounded bg-gray-200;
+  }
+}
+
+/* ProseMirror editor styling */
+.ProseMirror {
+  @apply outline-none min-h-[300px] px-0 py-4;
+  font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.6;
+}
+
+.ProseMirror p { @apply my-1; }
+.ProseMirror h1 { @apply text-2xl font-bold my-3; }
+.ProseMirror h2 { @apply text-xl font-bold my-2; }
+.ProseMirror h3 { @apply text-lg font-semibold my-2; }
+.ProseMirror ul, .ProseMirror ol { @apply pl-6 my-1; }
+.ProseMirror ul { @apply list-disc; }
+.ProseMirror ol { @apply list-decimal; }
+.ProseMirror li { @apply my-0.5; }
+.ProseMirror code {
+  @apply bg-gray-100 rounded px-1 py-0.5 text-sm font-mono;
+}
+.ProseMirror pre {
+  @apply bg-gray-900 text-gray-100 rounded p-4 my-2 overflow-x-auto;
+}
+.ProseMirror pre code {
+  @apply bg-transparent p-0 text-inherit;
+}
+.ProseMirror blockquote {
+  @apply border-l-4 border-gray-300 pl-4 my-2 text-gray-600 italic;
+}
+.ProseMirror hr { @apply border-gray-200 my-4; }
+.ProseMirror img { @apply max-w-full h-auto my-2 rounded; }
+
+/* Remote cursor styling (y-prosemirror) */
+.ProseMirror .y-cursor {
+  @apply relative border-l-2;
+  border-left-color: currentColor;
+}
+.ProseMirror .y-cursor::after {
+  content: attr(data-user);
+  @apply absolute top-0 left-0 text-xs text-white px-1 py-0.5 rounded-sm whitespace-nowrap;
+  background-color: currentColor;
+  transform: translateY(-100%);
+}
+.ProseMirror .y-cursor-inner {
+  @apply absolute pointer-events-none;
+  width: 2px;
+  height: 1.2em;
+}
+
+/* Menu bar (prosemirror-example-setup) */
+.ProseMirror-menubar {
+  @apply border-b border-gray-200 bg-white px-2 py-1 flex flex-wrap gap-1 sticky top-0 z-10;
+}
+.ProseMirror-menu-dropdown, .ProseMirror-menu-dropdown-menu {
+  @apply z-20;
+}
+.ProseMirror-menu-disabled { @apply opacity-30 pointer-events-none; }
+.ProseMirror-menuitem .ProseMirror-icon {
+  @apply inline-flex items-center justify-center w-7 h-7 rounded hover:bg-gray-100 text-gray-600 text-sm;
+}
+.ProseMirror-menuseparator {
+  @apply inline-block w-px h-5 bg-gray-200 mx-1 align-middle;
+}
+.ProseMirror-menu-dropdown-label {
+  @apply cursor-pointer px-1;
+}

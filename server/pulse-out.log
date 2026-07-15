@@ -1,0 +1,2 @@
+{"time":"2026-07-15T05:35:14.2061169+07:00","level":"INFO","msg":"config loaded","env":"dev","port":"8080","db":"postgres://pulse:%2A%2A%2A%2A@127.0.0.1:5433/pulse?sslmode=disable","redis":"redis://localhost:6379/0"}
+{"time":"2026-07-15T05:35:14.2510316+07:00","level":"ERROR","msg":"db open failed","error":"ping database: failed to connect to `user=pulse database=pulse`: 127.0.0.1:5433 (127.0.0.1): failed SASL auth: FATAL: password authentication failed for user \"pulse\" (SQLSTATE 28P01)"}

@@ -1,0 +1,40 @@
+# --- Secrets & env (jangan pernah commit .env sungguhan) ---
+.env
+.env.local
+.env.*.local
+server/.env
+web/.env*.local
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Editor ---
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# --- Go (server/) ---
+server/bin/
+server/*.exe
+server/*.exe~
+server/vendor/
+# Coverage / profiling output
+*.out
+*.prof
+pprof.*
+
+# --- Node / Next.js (web/) ---
+web/node_modules/
+web/.next/
+web/out/
+web/build/
+web/*.tsbuildinfo
+web/npm-debug.log*
+web/yarn-error.log*
+
+# --- Docker local data (kalau ada yang ter-volume keluar) ---
+data/
