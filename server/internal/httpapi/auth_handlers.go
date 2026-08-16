@@ -220,6 +220,10 @@ func (h *AuthHandlers) issueTokens(w http.ResponseWriter, r *http.Request, user 
 
 // decodeValid: decode JSON body + validasi. Return false jika sudah menulis error.
 func decodeValid(w http.ResponseWriter, r *http.Request, v *validator.Validate, dst any) bool {
+	// Hardening: batasi ukuran body (fix audit: tanpa MaxBytesReader, client
+	// bisa kirim body raksasa → DoS memori). 1 MB cukup untuk semua payload
+	// app ini (title, email, invite, dll).
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
 		writeError(w, http.StatusBadRequest, CodeBadRequest, "malformed JSON body")
 		return false
@@ -270,10 +274,12 @@ func (h *AuthHandlers) setRefreshCookie(w http.ResponseWriter, value string, exp
 }
 
 func (h *AuthHandlers) clearRefreshCookie(w http.ResponseWriter) {
+	// Path HARUS sama dengan setRefreshCookie ("/") — kalau beda, browser
+	// menganggap ini cookie berbeda dan cookie lama tidak pernah terhapus.
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieRefreshName,
 		Value:    "",
-		Path:     "/auth",
+		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   !h.isDev,

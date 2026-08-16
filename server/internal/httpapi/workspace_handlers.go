@@ -10,6 +10,7 @@ import (
 
 	"github.com/pulse/server/internal/boards"
 	"github.com/pulse/server/internal/documents"
+	"github.com/pulse/server/internal/models"
 	"github.com/pulse/server/internal/workspaces"
 )
 
@@ -79,11 +80,35 @@ func (h *WorkspaceHandlers) Create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// requireMember memastikan user adalah anggota workspace (role apapun) ATAU
+// memiliki document share dalam workspace tersebut. Menulis error response dan
+// return false jika keduanya tidak terpenuhi.
+func (h *WorkspaceHandlers) requireMember(w http.ResponseWriter, r *http.Request, wsID uuid.UUID) bool {
+	uid, ok := userIDFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, CodeUnauthorized, "no user")
+		return false
+	}
+	_, err := h.wsRepo.GetMemberRole(r.Context(), wsID, uid)
+	if err == nil {
+		return true
+	}
+	shared, sErr := h.docsRepo.HasSharedDocInWorkspace(r.Context(), wsID, uid)
+	if sErr == nil && shared {
+		return true
+	}
+	writeError(w, http.StatusForbidden, CodeForbidden, "no access to workspace")
+	return false
+}
+
 // Get workspace by ID.
 func (h *WorkspaceHandlers) Get(w http.ResponseWriter, r *http.Request) {
 	wsID, err := uuid.Parse(chi.URLParam(r, "workspaceID"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, CodeBadRequest, "invalid id")
+		return
+	}
+	if !h.requireMember(w, r, wsID) {
 		return
 	}
 	ws, err := h.wsRepo.GetByID(r.Context(), wsID)
@@ -101,15 +126,54 @@ func (h *WorkspaceHandlers) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListDocuments in a workspace.
+// Untuk member: tampilkan semua dokumen workspace.
+// Untuk non-member dengan document share: tampilkan hanya dokumen yang di-share.
 func (h *WorkspaceHandlers) ListDocuments(w http.ResponseWriter, r *http.Request) {
 	wsID, err := uuid.Parse(chi.URLParam(r, "workspaceID"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, CodeBadRequest, "invalid id")
 		return
 	}
-	docs, err := h.docsRepo.ListByWorkspace(r.Context(), wsID, 50)
+	uid, ok := userIDFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, CodeUnauthorized, "no user")
+		return
+	}
+	if !h.requireMember(w, r, wsID) {
+		return
+	}
+
+	_, roleErr := h.wsRepo.GetMemberRole(r.Context(), wsID, uid)
+	isMember := roleErr == nil
+
+	var docs []*models.Document
+	if isMember {
+		docs, err = h.docsRepo.ListByWorkspace(r.Context(), wsID, 50)
+	} else {
+		docs, err = h.docsRepo.ListSharedInWorkspace(r.Context(), wsID, uid, 50)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, CodeInternal, "could not list documents")
+		return
+	}
+	out := make([]documentDTO, 0, len(docs))
+	for _, d := range docs {
+		out = append(out, toDocDTO(d))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"documents": out})
+}
+
+// ListSharedDocuments lists documents shared directly with the user
+// (document-level sharing, without workspace membership).
+func (h *WorkspaceHandlers) ListSharedDocuments(w http.ResponseWriter, r *http.Request) {
+	uid, ok := userIDFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, CodeUnauthorized, "no user")
+		return
+	}
+	docs, err := h.docsRepo.ListSharedWithUser(r.Context(), uid, 50)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, CodeInternal, "could not list shared documents")
 		return
 	}
 	out := make([]documentDTO, 0, len(docs))
@@ -129,6 +193,12 @@ func (h *WorkspaceHandlers) CreateDocument(w http.ResponseWriter, r *http.Reques
 	wsID, err := uuid.Parse(chi.URLParam(r, "workspaceID"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, CodeBadRequest, "invalid id")
+		return
+	}
+	// FIX IDOR (kritis): sebelumnya handler tidak memverifikasi keanggotaan
+	// workspace — user terautentikasi mana pun bisa membuat dokumen di
+	// workspace orang lain. Hanya member (role apapun) yang boleh.
+	if !h.requireMember(w, r, wsID) {
 		return
 	}
 	var req createDocRequest

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -28,6 +29,17 @@ func (h *SnapshotHandlers) ListSnapshots(w http.ResponseWriter, r *http.Request)
 	docID, err := uuid.Parse(chi.URLParam(r, "documentID"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, CodeBadRequest, "invalid document id")
+		return
+	}
+	// Authz: hanya member workspace dokumen yang boleh lihat riwayat.
+	userID, ok := userIDFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, CodeUnauthorized, "no user in context")
+		return
+	}
+	memberRole, err := h.docRepo.MemberRole(r.Context(), docID, userID)
+	if err != nil || memberRole == "" {
+		writeError(w, http.StatusForbidden, CodeForbidden, "not a workspace member")
 		return
 	}
 	snapshots, err := h.snapshotRepo.ListByDocument(r.Context(), docID)
@@ -72,12 +84,24 @@ func (h *SnapshotHandlers) RestoreSnapshot(w http.ResponseWriter, r *http.Reques
 
 	snapshot, err := h.snapshotRepo.GetByID(r.Context(), snapshotID)
 	if err != nil {
+		if errors.Is(err, documents.ErrNotFound) {
+			writeError(w, http.StatusNotFound, CodeNotFound, "snapshot not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, CodeInternal, "could not get snapshot")
 		return
 	}
 
-	userUUID := uuid.MustParse(userID.String())
-	restoreUserID := &userUUID
+	// FIX IDOR (kritis): verifikasi snapshot milik dokumen yang diminta.
+	// Sebelumnya snapshot di-fetch hanya by ID tanpa cek kepemilikan —
+	// owner/editor dokumen A yang mengetahui ID snapshot dokumen B bisa
+	// menimpa state dokumen A dengan snapshot B.
+	if snapshot.DocumentID != docID {
+		writeError(w, http.StatusNotFound, CodeNotFound, "snapshot not found for document")
+		return
+	}
+
+	restoreUserID := &userID
 	if err := h.snapshotRepo.SaveSnapshot(r.Context(), docID, snapshot.State, snapshot.EventCount, restoreUserID); err != nil {
 		slog.Error("failed to save restore snapshot marker", "error", err)
 	}

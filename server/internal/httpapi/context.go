@@ -29,6 +29,11 @@ func userIDFrom(ctx context.Context) (uuid.UUID, bool) {
 	return v, ok
 }
 
+func emailFrom(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(keyUserEmail).(string)
+	return v, ok
+}
+
 func userEmailFrom(ctx context.Context) string {
 	v, _ := ctx.Value(keyUserEmail).(string)
 	return v
