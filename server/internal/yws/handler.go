@@ -5,7 +5,6 @@ package yws
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	"github.com/pulse/server/internal/comments"
 	"github.com/pulse/server/internal/documents"
 	"github.com/pulse/server/internal/httpapi"
 )
@@ -22,12 +22,17 @@ import (
 type WSHandler struct {
 	store    *Store
 	docs     *documents.Repo
+	comRepo  *comments.Repo
 	snapRepo *documents.SnapshotRepo
 	logger   *slog.Logger
 	upgrader websocket.Upgrader
 }
 
 func NewWSHandler(store *Store, docs *documents.Repo, snapRepo *documents.SnapshotRepo, allowedOrigin string, logger *slog.Logger) *WSHandler {
+	return NewWSHandlerWithComments(store, docs, nil, snapRepo, allowedOrigin, logger)
+}
+
+func NewWSHandlerWithComments(store *Store, docs *documents.Repo, comRepo *comments.Repo, snapRepo *documents.SnapshotRepo, allowedOrigin string, logger *slog.Logger) *WSHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -84,19 +89,32 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := claims.UserID
 
-	// 3. Authorization: pastikan user adalah anggota workspace dokumen.
-	role, err := h.docs.MemberRole(r.Context(), docID, userID)
+	// 3. Authorization: check if user has access (workspace member OR direct
+	//    share OR link share token "ls"). Link share = "Anyone with the link"
+	//    (fiturwajibada H.168) — permission view/edit dari token.
+	hasAccess, permission, err := h.docs.HasDocumentAccess(r.Context(), docID, userID)
 	if err != nil {
-		// ErrNotFound = bukan anggota → 403. Error lain → 500.
-		status := http.StatusForbidden
-		if !errors.Is(err, documents.ErrNotFound) && !errors.Is(err, documents.ErrNotFound /* member not found */) {
-			// actual DB error
-			h.logger.Error("ws role check failed", "error", err, "doc", docID, "user", userID)
-			status = http.StatusInternalServerError
-		}
-		httpapi.NewWSWriteError(w, status, "forbidden")
+		h.logger.Error("ws access check failed", "error", err, "doc", docID, "user", userID)
+		httpapi.NewWSWriteError(w, http.StatusInternalServerError, "access check failed")
 		return
 	}
+	if !hasAccess {
+		lsToken := r.URL.Query().Get("ls")
+		if lsToken != "" && h.comRepo != nil {
+			ls, err := h.comRepo.GetByToken(r.Context(), lsToken)
+			if err == nil && ls.DocumentID == docID {
+				hasAccess = true
+				permission = ls.Permission
+			}
+		}
+	}
+	if !hasAccess {
+		httpapi.NewWSWriteError(w, http.StatusForbidden, "no access to document")
+		return
+	}
+
+	// Use permission as role (owner/editor/viewer or view/edit from share)
+	role := permission
 
 	// 4. Upgrade ke WebSocket.
 	ws, err := h.upgrader.Upgrade(w, r, nil)
@@ -131,6 +149,12 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	doc.AddConnection(conn)
 
+	// FIX viewer read-only (UI): kirim role ke client saat connect supaya
+	// client bisa render editor sebagai read-only untuk viewer (share "view"
+	// atau workspace viewer). Pesan: MsgRole (byte 5) + role string.
+	roleMsg := EncodeRoleMessage(conn.Role)
+	conn.Send(roleMsg)
+
 	h.logger.Info("ws connected",
 		"doc", docID, "user", userID, "role", role,
 		"connections", doc.ConnectionCount())
@@ -155,12 +179,11 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	doc.RemoveConnection(conn)
 	conn.Close()
 	<-pumpDone
+	// Bersihkan dokumen yang tidak terpakai lagi (tanpa pending data).
+	h.store.MaybeEvict(docID)
 
 	h.logger.Info("ws disconnected",
 		"doc", docID, "user", userID,
 		"connections", doc.ConnectionCount(),
 		"readErr", readErr)
 }
-
-// errors dipakai di atas; import di sini supaya tidak tertinggal.
-var _ = errors.Is

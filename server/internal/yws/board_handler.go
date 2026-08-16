@@ -13,6 +13,7 @@ import (
 
 	"github.com/pulse/server/internal/boards"
 	"github.com/pulse/server/internal/httpapi"
+	"github.com/pulse/server/internal/workspaces"
 )
 
 // BoardRoom menyimpan koneksi untuk satu board.
@@ -27,9 +28,11 @@ type BoardConn struct {
 	ws       *websocket.Conn
 	room     *BoardRoom
 	send     chan []byte
+	done     chan struct{}
 	closeOnce sync.Once
 	UserID   string
 	UserName string
+	Role     string
 }
 
 // BoardHub mengelola board-id → BoardRoom.
@@ -95,6 +98,22 @@ func (r *BoardRoom) Remove(c *BoardConn) {
 	r.mu.Unlock()
 }
 
+// MaybeEvict membuang room kosong dari hub (mencegah memory leak).
+func (h *BoardHub) MaybeEvict(boardID uuid.UUID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	r, ok := h.rooms[boardID]
+	if !ok {
+		return
+	}
+	r.mu.Lock()
+	empty := len(r.connections) == 0
+	r.mu.Unlock()
+	if empty {
+		delete(h.rooms, boardID)
+	}
+}
+
 // Broadcast kirim data ke semua koneksi di room kecuali pengecualian.
 func (r *BoardRoom) Broadcast(data []byte, except *BoardConn) {
 	r.mu.RLock()
@@ -108,7 +127,10 @@ func (r *BoardRoom) Broadcast(data []byte, except *BoardConn) {
 		if c == except {
 			continue
 		}
+		// Non-blocking. Channel `send` tidak pernah di-close (sinyal shutdown
+		// via `done`) → tidak ada risiko panic "send on closed channel".
 		select {
+		case <-c.done:
 		case c.send <- data:
 		default:
 		}
@@ -117,13 +139,14 @@ func (r *BoardRoom) Broadcast(data []byte, except *BoardConn) {
 
 // BoardWSHandler menangani upgrade WS untuk board.
 type BoardWSHandler struct {
-	hub      *BoardHub
+	hub       *BoardHub
 	boardRepo *boards.Repo
-	logger   *slog.Logger
-	upgrader websocket.Upgrader
+	wsRepo    *workspaces.Repo
+	logger    *slog.Logger
+	upgrader  websocket.Upgrader
 }
 
-func NewBoardWSHandler(hub *BoardHub, boardRepo *boards.Repo, allowedOrigin string, logger *slog.Logger) *BoardWSHandler {
+func NewBoardWSHandler(hub *BoardHub, boardRepo *boards.Repo, wsRepo *workspaces.Repo, allowedOrigin string, logger *slog.Logger) *BoardWSHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -131,6 +154,7 @@ func NewBoardWSHandler(hub *BoardHub, boardRepo *boards.Repo, allowedOrigin stri
 	return &BoardWSHandler{
 		hub:       hub,
 		boardRepo: boardRepo,
+		wsRepo:    wsRepo,
 		logger:    logger,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:   4096,
@@ -159,6 +183,20 @@ func (h *BoardWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpapi.NewWSWriteError(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
+	userID := claims.UserID
+
+	// Authorization: pastikan user adalah anggota workspace board.
+	wsID, err := h.boardRepo.BoardWorkspaceID(r.Context(), boardID)
+	if err != nil {
+		httpapi.NewWSWriteError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	role, err := h.wsRepo.GetMemberRole(r.Context(), wsID, userID)
+	if err != nil {
+		h.logger.Warn("board ws role check failed", "board", boardID, "user", userID, "error", err)
+		httpapi.NewWSWriteError(w, http.StatusForbidden, "forbidden")
+		return
+	}
 
 	ws, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -170,15 +208,21 @@ func (h *BoardWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ws:       ws,
 		room:     room,
 		send:     make(chan []byte, 64),
-		UserID:   claims.UserID.String(),
+		done:     make(chan struct{}),
+		UserID:   userID.String(),
 		UserName: claims.Name,
+		Role:     role,
 	}
 	room.Add(conn)
 
-	h.logger.Info("board ws connected", "board", boardID, "user", claims.UserID)
+	h.logger.Info("board ws connected", "board", boardID, "user", userID, "role", role)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Hardening: batasi ukuran frame & deteksi koneksi mati senyap.
+	ws.SetReadLimit(16 << 20) // 16 MB
+	_ = ws.SetReadDeadline(time.Now().Add(90 * time.Second))
 
 	// Write pump
 	pumpDone := make(chan struct{})
@@ -189,11 +233,10 @@ func (h *BoardWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			select {
 			case <-ctx.Done():
 				return
-			case msg, ok := <-conn.send:
-				if !ok {
-					ws.WriteMessage(websocket.CloseMessage, []byte{})
-					return
-				}
+			case <-conn.done:
+				ws.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			case msg := <-conn.send:
 				ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if err := ws.WriteMessage(websocket.TextMessage, msg); err != nil {
 					return
@@ -204,6 +247,7 @@ func (h *BoardWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Read pump
 	for {
+		_ = ws.SetReadDeadline(time.Now().Add(90 * time.Second))
 		_, payload, err := ws.ReadMessage()
 		if err != nil {
 			break
@@ -214,13 +258,14 @@ func (h *BoardWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	room.Remove(conn)
 	conn.Close()
 	<-pumpDone
+	h.hub.MaybeEvict(boardID)
 
-	h.logger.Info("board ws disconnected", "board", boardID, "user", claims.UserID)
+	h.logger.Info("board ws disconnected", "board", boardID, "user", userID)
 }
 
 func (c *BoardConn) Close() {
 	c.closeOnce.Do(func() {
-		close(c.send)
+		close(c.done)
 		c.ws.Close()
 	})
 }

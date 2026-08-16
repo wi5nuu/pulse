@@ -67,6 +67,12 @@ func (p *SyncProcessor) Process(ctx context.Context, c *Connection, payload []by
 	case uint64(MsgPong):
 		// Pong dari client (saat kita jadi pengirim ping). No-op.
 		return nil
+	case uint64(MsgDocEvent):
+		// Relay event dokumen (mis. komentar dibuat/diresolve) ke koneksi
+		// LAIN. Server tidak menginterpretasi isi — client yang render.
+		// Sender mendapat konfirmasi dari REST response-nya sendiri.
+		c.doc.Broadcast(append([]byte{byte(MsgDocEvent)}, body...), c)
+		return nil
 	default:
 		// Pesan tidak dikenali → abaikan (forward-compat). Jangan putuskan
 		// koneksi; client versi baru mungkin kirim pesan yang server lama tidak
@@ -80,7 +86,15 @@ func (p *SyncProcessor) Process(ctx context.Context, c *Connection, payload []by
 // batchAwareness memasukkan awareness ke buffer per-document untuk di-batch
 // dan di-broadcast periodik (window 50ms). Client-side sudah throttle ~20/s.
 func (p *SyncProcessor) batchAwareness(doc *Document, body []byte, sender *Connection) {
-	doc.QueueAwareness(sender.UserID, body)
+	doc.QueueAwareness(sender, body)
+}
+
+// isReadOnly: true jika user hanya boleh membaca (workspace viewer ATAU
+// document share dengan permission "view"). Fix IDOR: string "view" (share)
+// sebelumnya tidak cocok dengan check `Role == models.RoleViewer` sehingga
+// viewer via share bisa menulis — bypass read-only.
+func isReadOnly(role string) bool {
+	return role == models.RoleViewer || role == "view"
 }
 
 // handleSync: decode sub-protocol & route.
@@ -106,17 +120,23 @@ func (p *SyncProcessor) handleSync(ctx context.Context, c *Connection, body []by
 		// Client kirim documentUpdate → ini adalah state yang server minta,
 		// ATAU reply SYNC_STEP2 dari client saat server initiate.
 		// Update lastState server & broadcast ke client lain.
-		if c.Role == models.RoleViewer {
-			p.logger.Warn("viewer attempted sync step2, rejected", "user", c.UserID, "doc", c.doc.ID)
-			return ErrInvalidRole
+		if isReadOnly(c.Role) {
+			// Viewer ikut membalas SYNC_STEP1 yang dikirim persistence worker
+			// saat request snapshot. Jangan putuskan koneksi — cukup abaikan;
+			// snapshot hanya boleh berasal dari editor/owner.
+			p.logger.Debug("ignoring viewer sync step2", "user", c.UserID, "doc", c.doc.ID)
+			return nil
 		}
 		return p.handleSyncStep2(c, data)
 	case uint64(Update):
 		// Pembaruan inkremental dari client → broadcast ke client lain.
 		// Server TIDAK merge ke lastState (tidak bisa tanpa library Yjs).
-		if c.Role == models.RoleViewer {
-			p.logger.Warn("viewer attempted update, rejected", "user", c.UserID, "doc", c.doc.ID)
-			return ErrInvalidRole
+		if isReadOnly(c.Role) {
+			// Viewers seharusnya tidak pernah mengirim Update (client
+			// enforces read-only). Kalau terjadi, drop saja — jangan
+			// memutus koneksi, lebih robust terhadap bug client.
+			p.logger.Warn("dropping update from viewer", "user", c.UserID, "doc", c.doc.ID)
+			return nil
 		}
 		return p.handleUpdate(c, data)
 	default:
@@ -130,6 +150,9 @@ func (p *SyncProcessor) handleSync(ctx context.Context, c *Connection, body []by
 //   - Kalau server punya lastState (state penuh yang sudah di-write-back):
 //     balas SYNC_STEP2(lastState) → client apply. BENAR & idempotent (CRDT).
 //     Lalu replay events dari DB (events setelah snapshot) sebagai UPDATE.
+//     Selanjutnya minta state vector client via SYNC_STEP1 balik — client
+//     yang punya update offline akan membalas SYNC_STEP2 (fix C2: edit yang
+//     dibuat saat putus koneksi TIDAK boleh hilang).
 //   - Kalau TIDAK punya lastState (dokumen baru / belum di-persist):
 //     balas SYNC_STEP1 kosong ke client → client akan reply dengan
 //     SYNC_STEP2(full state) yang server simpan sebagai lastState.
@@ -141,9 +164,23 @@ func (p *SyncProcessor) handleSyncStep1(c *Connection, stateVector []byte) error
 		c.Send(reply)
 
 		// Replay events yang dimuat dari DB (events setelah snapshot).
-		// Dikirim sebagai UPDATE messages agar client apply di atas snapshot.
-		for _, event := range c.doc.GetAndClearReplayEvents() {
-			c.Send(buildSyncMessage(Update, event))
+		// Per-koneksi (fix M1): setiap koneksi menerima semua events,
+		// bukan hanya koneksi pertama setelah server restart.
+		if !c.replaySent {
+			for _, event := range c.doc.GetReplayEvents() {
+				c.Send(buildSyncMessage(Update, event))
+			}
+			c.replaySent = true
+		}
+
+		// Fix C2: minta state client balik supaya update yang dibuat saat
+		// offline tidak hilang. Client yang punya local changes akan membalas
+		// SYNC_STEP2(full state) → server SetState (merge CRDT di client).
+		// State vector client yang dikirim via parameter dipakai sebagai
+		// sinyal: jika client mengirim SV kosong (dokumen baru), tidak perlu
+		// tanya balik.
+		if len(stateVector) > 0 {
+			c.Send(buildSyncMessage(SyncStep1, stateVector))
 		}
 
 		return nil
