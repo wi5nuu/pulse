@@ -48,6 +48,22 @@ func (h *BoardHandlers) requireEditor(w http.ResponseWriter, r *http.Request, wo
 	return true
 }
 
+// requireMember memastikan user adalah anggota workspace (role apapun).
+// Menulis error response dan return false jika bukan anggota.
+func (h *BoardHandlers) requireMember(w http.ResponseWriter, r *http.Request, workspaceID uuid.UUID) bool {
+	uid, ok := userIDFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, CodeUnauthorized, "no user")
+		return false
+	}
+	_, err := h.wsRepo.GetMemberRole(r.Context(), workspaceID, uid)
+	if err != nil {
+		writeError(w, http.StatusForbidden, CodeForbidden, "not a workspace member")
+		return false
+	}
+	return true
+}
+
 // broadcastEvent mengirim event board ke semua client via WebSocket hub.
 func (h *BoardHandlers) broadcastEvent(boardID uuid.UUID, eventType string, data interface{}) {
 	evt := map[string]interface{}{
@@ -106,7 +122,7 @@ type updateColumnRequest struct {
 }
 
 type updateTaskRequest struct {
-	Title       string     `json:"title,omitempty"`
+	Title       *string    `json:"title,omitempty"`
 	Description *string    `json:"description,omitempty"`
 	ColumnID    *uuid.UUID `json:"columnId,omitempty"`
 	Position    *float64   `json:"position,omitempty"`
@@ -118,6 +134,9 @@ func (h *BoardHandlers) ListBoards(w http.ResponseWriter, r *http.Request) {
 	wsID, err := uuid.Parse(chi.URLParam(r, "workspaceID"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, CodeBadRequest, "invalid workspace id")
+		return
+	}
+	if !h.requireMember(w, r, wsID) {
 		return
 	}
 	list, err := h.repo.ListBoards(r.Context(), wsID)
@@ -169,6 +188,15 @@ func (h *BoardHandlers) GetBoard(w http.ResponseWriter, r *http.Request) {
 	boardID, err := uuid.Parse(chi.URLParam(r, "boardID"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, CodeBadRequest, "invalid board id")
+		return
+	}
+	// Authz: hanya member workspace board yang boleh baca.
+	wsID, err := h.repo.BoardWorkspaceID(r.Context(), boardID)
+	if err != nil {
+		writeError(w, http.StatusForbidden, CodeForbidden, "not a workspace member")
+		return
+	}
+	if !h.requireMember(w, r, wsID) {
 		return
 	}
 	columns, tasks, err := h.repo.ListColumnsAndTasks(r.Context(), boardID)
@@ -227,6 +255,10 @@ func (h *BoardHandlers) CreateColumn(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, CodeInternal, "could not create column")
 		return
 	}
+	// Broadcast supaya client lain melihat kolom baru real-time.
+	h.broadcastEvent(boardID, "column_created", map[string]any{
+		"id": c.ID, "title": c.Title, "position": c.Position,
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"column": columnDTO{ID: c.ID, BoardID: c.BoardID, Title: c.Title, Position: c.Position},
 	})
@@ -288,6 +320,10 @@ func (h *BoardHandlers) DeleteColumn(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, CodeInternal, "could not delete column")
 		return
 	}
+	// Broadcast supaya client lain menghapus kolom real-time.
+	if boardID, e := h.repo.BoardIDByColumn(r.Context(), colID); e == nil {
+		h.broadcastEvent(boardID, "column_deleted", map[string]any{"id": colID})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -330,7 +366,12 @@ func (h *BoardHandlers) CreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if boardID, e := h.repo.BoardIDByColumn(r.Context(), colID); e == nil {
-		h.broadcastEvent(boardID, "task_created", t)
+		// Pakai taskDTO (camelCase) supaya konsisten dengan payload REST lain.
+		h.broadcastEvent(boardID, "task_created", taskDTO{
+			ID: t.ID, ColumnID: t.ColumnID, Title: t.Title,
+			Description: t.Description, AssigneeID: t.AssigneeID,
+			Position: t.Position, Version: t.Version,
+		})
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"task": taskDTO{
@@ -395,8 +436,9 @@ func (h *BoardHandlers) DeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	boardID, boardErr := h.repo.BoardIDByTask(r.Context(), taskID)
-	if err := h.repo.DeleteTask(r.Context(), taskID); err != nil {
-		if errors.Is(err, boards.ErrNotFound) {
+	deleteErr := h.repo.DeleteTask(r.Context(), taskID)
+	if deleteErr != nil {
+		if errors.Is(deleteErr, boards.ErrNotFound) {
 			writeError(w, http.StatusNotFound, CodeNotFound, "task not found")
 			return
 		}
