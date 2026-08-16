@@ -106,13 +106,14 @@ func (h *DocHandlers) Rename(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, CodeBadRequest, "invalid document id")
 		return
 	}
-	// Authorization: cek role. Viewer tidak boleh rename.
-	role, err := h.repo.MemberRole(r.Context(), docID, uid)
-	if err != nil {
+	// Authorization: cek akses (workspace member ATAU document share).
+	// Viewer (workspace) atau view (share) tidak boleh rename.
+	hasAccess, permission, err := h.repo.HasDocumentAccess(r.Context(), docID, uid)
+	if err != nil || !hasAccess {
 		writeError(w, http.StatusForbidden, CodeForbidden, "forbidden")
 		return
 	}
-	if role == "viewer" {
+	if permission == "viewer" || permission == "view" {
 		writeError(w, http.StatusForbidden, CodeForbidden, "viewers cannot edit")
 		return
 	}
@@ -143,12 +144,14 @@ func (h *DocHandlers) Delete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, CodeBadRequest, "invalid document id")
 		return
 	}
+	// Authorization: hanya workspace member (owner/editor) yang boleh delete.
+	// Document share tidak memberikan hak delete.
 	role, err := h.repo.MemberRole(r.Context(), docID, uid)
 	if err != nil {
 		writeError(w, http.StatusForbidden, CodeForbidden, "forbidden")
 		return
 	}
-	if role == "viewer" {
+	if role == models.RoleViewer {
 		writeError(w, http.StatusForbidden, CodeForbidden, "viewers cannot delete")
 		return
 	}
