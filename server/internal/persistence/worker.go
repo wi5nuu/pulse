@@ -67,8 +67,10 @@ func (w *Worker) Start(ctx context.Context) {
 
 	flushTicker := time.NewTicker(w.cfg.FlushInterval)
 	snapTicker := time.NewTicker(w.cfg.SnapshotInterval)
+	evictTicker := time.NewTicker(5 * time.Minute)
 	defer flushTicker.Stop()
 	defer snapTicker.Stop()
+	defer evictTicker.Stop()
 
 	for {
 		select {
@@ -80,6 +82,13 @@ func (w *Worker) Start(ctx context.Context) {
 			w.flushPending(ctx)
 		case <-snapTicker.C:
 			w.checkSnapshots(ctx)
+		case <-evictTicker.C:
+			// Fix M2: evict dokumen yang sudah tidak punya koneksi + punya
+			// state (bisa di-rebuild dari DB). Mencegah memory leak.
+			evicted := w.store.EvictStale()
+			if evicted > 0 {
+				w.logger.Info("evicted stale documents", "count", evicted)
+			}
 		}
 	}
 }
@@ -88,29 +97,58 @@ func (w *Worker) Done() <-chan struct{} {
 	return w.done
 }
 
+// FlushNow menyiram semua pending events ke DB secara sinkron. Dipanggil saat
+// shutdown (fix M4): sebelum worker berhenti, sisa pending events (≤5 detik
+// terakhir) harus masuk DB supaya tidak hilang saat restart.
+func (w *Worker) FlushNow(ctx context.Context) {
+	w.store.ForEachDirty(ctx, func(ctx context.Context, docID uuid.UUID, doc *yws.Document) bool {
+		events, count := doc.GetAndClearPendingEvents()
+		if len(events) > 0 {
+			if err := w.batchInsertEvents(ctx, docID, events); err != nil {
+				// Shutdown: tidak bisa retry lagi — kembalikan buffer, log.
+				doc.RestorePendingEvents(events, count)
+				w.logger.Error("final flush failed", "doc", docID, "error", err)
+				return true
+			}
+			w.logger.Info("final flush complete", "doc", docID, "count", count)
+			_ = w.docRepo.TouchUpdated(ctx, docID)
+		}
+		return true
+	})
+	w.store.EvictStale()
+}
+
 func (w *Worker) flushPending(ctx context.Context) {
 	w.store.ForEachDirty(ctx, func(ctx context.Context, docID uuid.UUID, doc *yws.Document) bool {
 		events, count := doc.GetAndClearPendingEvents()
-		if len(events) == 0 {
-			return true
-		}
-		if err := w.batchInsertEvents(ctx, docID, events); err != nil {
-			w.logger.Error("flush events failed", "doc", docID, "error", err)
-			return true
-		}
-		w.logger.Debug("flushed events", "doc", docID, "count", count)
-		if count >= w.cfg.MaxEventsBeforeSnapshot {
-			if state, ok := doc.State(); ok {
-				if err := w.snapRepo.SaveSnapshot(ctx, docID, state, count, nil); err != nil {
-					w.logger.Error("save snapshot failed", "doc", docID, "error", err)
-				} else {
-					w.logger.Info("snapshot saved (event threshold)", "doc", docID, "count", count)
-				}
-			} else {
-				w.requestSnapshot(ctx, docID, doc)
+		if len(events) > 0 {
+			if err := w.batchInsertEvents(ctx, docID, events); err != nil {
+				// Jangan kehilangan update: kembalikan ke buffer, coba lagi
+				// di tick berikutnya.
+				doc.RestorePendingEvents(events, count)
+				w.logger.Error("flush events failed", "doc", docID, "error", err)
+				return true
 			}
+			w.logger.Debug("flushed events", "doc", docID, "count", count)
+			_ = w.docRepo.TouchUpdated(ctx, docID)
 		}
-		_ = w.docRepo.TouchUpdated(ctx, docID)
+		w.handleSnapshot(ctx, docID, doc)
+		return true
+	})
+}
+
+func (w *Worker) checkSnapshots(ctx context.Context) {
+	w.store.ForEachDirty(ctx, func(ctx context.Context, docID uuid.UUID, doc *yws.Document) bool {
+		events, count := doc.GetAndClearPendingEvents()
+		if len(events) > 0 {
+			if err := w.batchInsertEvents(ctx, docID, events); err != nil {
+				doc.RestorePendingEvents(events, count)
+				w.logger.Error("periodic flush failed", "doc", docID, "error", err)
+				return true
+			}
+			_ = w.docRepo.TouchUpdated(ctx, docID)
+		}
+		w.handleSnapshot(ctx, docID, doc)
 		return true
 	})
 }
@@ -136,33 +174,39 @@ func (w *Worker) batchInsertEvents(ctx context.Context, docID uuid.UUID, events 
 	return tx.Commit(ctx)
 }
 
-func (w *Worker) checkSnapshots(ctx context.Context) {
-	w.store.ForEachDirty(ctx, func(ctx context.Context, docID uuid.UUID, doc *yws.Document) bool {
-		if state, ok := doc.State(); ok {
-			events, _ := doc.GetAndClearPendingEvents()
-			totalCount := len(events)
-			if totalCount == 0 {
-				return true
-			}
-			if err := w.batchInsertEvents(ctx, docID, events); err != nil {
-				w.logger.Error("checkSnapshot flush failed", "doc", docID, "error", err)
-				return true
-			}
-			if err := w.snapRepo.SaveSnapshot(ctx, docID, state, totalCount, nil); err != nil {
-				w.logger.Error("checkSnapshot save failed", "doc", docID, "error", err)
-			} else {
-				w.logger.Info("periodic snapshot saved", "doc", docID, "count", totalCount)
-			}
-			_ = w.docRepo.TouchUpdated(ctx, docID)
-		} else if doc.ConnectionCount() > 0 {
-			w.requestSnapshot(ctx, docID, doc)
+// handleSnapshot menyimpan snapshot bila aman:
+//   - snapshotDue (ada event sejak snapshot terakhir) DAN
+//   - stateFresh (lastState memuat semua event yang sudah di-flush).
+//
+// Kalau state masih basi, minta full state dari client (write-back); snapshot
+// disimpan di tick berikutnya setelah client membalas. Kalau tidak ada state
+// sama sekali dan ada koneksi, minta state awal.
+func (w *Worker) handleSnapshot(ctx context.Context, docID uuid.UUID, doc *yws.Document) {
+	if !doc.SnapshotDue() {
+		return
+	}
+	if state, ok := doc.State(); ok && doc.StateFresh() {
+		eventCount := doc.SinceLastSnapshot()
+		if err := w.snapRepo.SaveSnapshot(ctx, docID, state, eventCount, nil); err != nil {
+			w.logger.Error("save snapshot failed", "doc", docID, "error", err)
+			return
 		}
-		return true
-	})
+		// m3 fix: prune events yang sudah tercakup snapshot terbaru supaya
+		// tabel document_events tidak tumbuh tanpa batas.
+		if err := w.snapRepo.PruneEventsBeforeSnapshot(ctx, docID); err != nil {
+			w.logger.Warn("prune events failed", "doc", docID, "error", err)
+		}
+		doc.ClearSnapshotDue()
+		w.logger.Info("snapshot saved", "doc", docID, "eventCount", eventCount)
+		return
+	}
+	if doc.ConnectionCount() > 0 {
+		w.requestSnapshot(ctx, docID, doc)
+	}
 }
 
 func (w *Worker) requestSnapshot(ctx context.Context, docID uuid.UUID, doc *yws.Document) {
-	w.logger.Info("requesting snapshot from client", "doc", docID)
+	w.logger.Debug("requesting snapshot from client", "doc", docID)
 	emptySV := []byte{}
 	msg := yws.BuildSyncStep1Message(emptySV)
 	doc.Broadcast(msg, nil)

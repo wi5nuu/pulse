@@ -26,6 +26,7 @@ import (
 
 	"github.com/pulse/server/internal/auth"
 	"github.com/pulse/server/internal/boards"
+	"github.com/pulse/server/internal/comments"
 	"github.com/pulse/server/internal/documents"
 	pulsedb "github.com/pulse/server/internal/db"
 	"github.com/pulse/server/internal/httpapi"
@@ -76,6 +77,15 @@ func main() {
 		logger.Error("pgxpool parse failed", "error", err)
 		os.Exit(1)
 	}
+	// Hardening (fix audit): batasi pool eksplisit supaya total koneksi ke DB
+	// terkontrol (sebelumnya default pgx — di mesin multicore bisa >40 koneksi
+	// paralel dengan pool `db` 25). Tambah query timeout via statement_timeout.
+	poolCfg.MaxConns = 25
+	poolCfg.MinConns = 2
+	poolCfg.MaxConnLifetime = time.Hour
+	poolCfg.MaxConnIdleTime = 15 * time.Minute
+	poolCfg.ConnConfig.RuntimeParams["statement_timeout"] = "10000" // 10 detik per query
+	poolCfg.ConnConfig.RuntimeParams["lock_timeout"] = "5000"       // 5 detik antre lock
 	pool, err := pgxpool.NewWithConfig(startupCtx, poolCfg)
 	if err != nil {
 		logger.Error("pgxpool open failed", "error", err)
@@ -101,22 +111,32 @@ func main() {
 	docsRepo := documents.NewRepo(pool)
 	boardRepo := boards.NewRepo(pool)
 	snapRepo := documents.NewSnapshotRepo(pool)
+	comRepo := comments.NewRepo(pool)
 
 	// --- Yjs WebSocket realtime layer ---
 	httpapi.SetWSJWTVerifier(jwtSvc)
 	ywsStore := yws.NewStore(logger.With("component", "yws-store"))
-	wsHandler := yws.NewWSHandler(ywsStore, docsRepo, snapRepo, cfg.CORSOrigin, logger.With("component", "ws"))
+	wsHandler := yws.NewWSHandlerWithComments(ywsStore, docsRepo, comRepo, snapRepo, cfg.CORSOrigin, logger.With("component", "ws"))
 
 	// --- Board WebSocket hub ---
 	boardHub := yws.NewBoardHub(logger.With("component", "board-ws"))
-	boardWSHandler := yws.NewBoardWSHandler(boardHub, boardRepo, cfg.CORSOrigin, logger.With("component", "board-ws"))
+	boardWSHandler := yws.NewBoardWSHandler(boardHub, boardRepo, wsRepo, cfg.CORSOrigin, logger.With("component", "board-ws"))
 	httpapi.SetBoardEventBroadcaster(boardHub.Broadcast)
 
 	// --- Doc state broadcaster untuk snapshot restore ---
+	// Set in-memory state DULU supaya client baru (dan persistence worker)
+	// mendapat state hasil restore, bukan state lama yang basi.
 	httpapi.SetDocStateBroadcaster(func(docID uuid.UUID, data []byte) {
 		doc := ywsStore.GetOrCreate(docID)
+		doc.SetState(data)
 		syncMsg := yws.BuildSyncStep2Message(data)
 		doc.Broadcast(syncMsg, nil)
+	})
+
+	// --- Doc event broadcaster: relay event komentar realtime via WS ---
+	httpapi.SetDocEventBroadcaster(func(docID uuid.UUID, data []byte) {
+		doc := ywsStore.GetOrCreate(docID)
+		doc.Broadcast(yws.EncodeDocEventMessage(data), nil)
 	})
 
 	// --- Persistence worker ---
@@ -143,12 +163,14 @@ func main() {
 		UsersRepo:      usersRepo,
 		WsRepo:         wsRepo,
 		DocsRepo:       docsRepo,
+		CommentRepo:    comRepo,
 		BoardRepo:      boardRepo,
 		SnapRepo:       snapRepo,
 		WSHandler:      wsHandler,
 		BoardWSHandler: boardWSHandler,
 		AccessTTL:      cfg.JWTAccessTTL,
 		RefreshTTL:     cfg.RefreshTTL,
+		Logger:         logger,
 	})
 
 	srv := &http.Server{
@@ -162,8 +184,11 @@ func main() {
 	}
 
 	// --- Graceful shutdown ---
-	// Dengarkan SIGINT/SIGTERM. Saat sinyal masuk, beri waktu 15 detik untuk
-	// menyelesaikan in-flight request sebelum exit.
+	// Dengarkan SIGINT/SIGTERM. Saat sinyal masuk:
+	//   1. Hentikan penerimaan request baru (srv.Shutdown).
+	//   2. Final flush pending events ke DB (fix M4 — edit ≤5 detik terakhir
+	//      tidak boleh hilang saat restart).
+	//   3. Tutup persistence worker.
 	done := make(chan struct{})
 	go func() {
 		sig := make(chan os.Signal, 1)
@@ -176,6 +201,17 @@ func main() {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			logger.Error("shutdown error", "error", err)
 		}
+
+		// Final flush: siram pending events sebelum worker dihentikan.
+		persistWorker.FlushNow(shutdownCtx)
+		persistCancel()
+		<-persistWorker.Done()
+
+		// Tutup store — tidak menerima dokumen baru.
+		if err := ywsStore.Close(shutdownCtx); err != nil {
+			logger.Error("store close error", "error", err)
+		}
+
 		close(done)
 	}()
 

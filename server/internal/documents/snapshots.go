@@ -113,4 +113,24 @@ func (r *SnapshotRepo) LoadEventsSince(ctx context.Context, docID uuid.UUID, sin
 	return out, rows.Err()
 }
 
+// PruneEventsBeforeSnapshot menghapus document_events yang lebih OLD dari
+// snapshot terbaru dokumen. Dipanggil setelah snapshot disimpan (m3 fix:
+// tabel events tidak boleh tumbuh tanpa batas — snapshot sudah menangkap
+// semua state, event lama tidak perlu lagi).
+func (r *SnapshotRepo) PruneEventsBeforeSnapshot(ctx context.Context, docID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, `
+		DELETE FROM document_events e
+		WHERE e.document_id = $1
+		  AND e.created_at <= COALESCE((
+		      SELECT created_at FROM document_snapshots
+		      WHERE document_id = $1
+		      ORDER BY version DESC LIMIT 1
+		  ), '-infinity'::timestamptz)`,
+		docID)
+	if err != nil {
+		return fmt.Errorf("prune events: %w", err)
+	}
+	return nil
+}
+
 

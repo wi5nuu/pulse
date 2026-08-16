@@ -2,10 +2,14 @@ package boards
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/pulse/server/internal/users"
+	"github.com/pulse/server/internal/workspaces"
 )
 
 // skipIfNoDB skips test jika tidak ada koneksi DB.
@@ -20,6 +24,21 @@ func skipIfNoDB(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// setupEnv membuat user + workspace nyata supaya FK boards terpenuhi.
+func setupEnv(t *testing.T, pool *pgxpool.Pool) (userID, wsID uuid.UUID) {
+	t.Helper()
+	ctx := context.Background()
+	u, err := users.NewRepo(pool).Create(ctx, fmt.Sprintf("test-%s@pulse.test", uuid.NewString()), "Test User", "x")
+	if err != nil {
+		t.Fatal("create user:", err)
+	}
+	ws, err := workspaces.NewRepo(pool).CreatePersonalWorkspace(ctx, u.ID, "Test WS "+uuid.NewString())
+	if err != nil {
+		t.Fatal("create workspace:", err)
+	}
+	return u.ID, ws.ID
+}
+
 // Fractional indexing: insert di tengah, posisi baru adalah rata-rata tetangga.
 func TestFractionalIndex_Midpoint(t *testing.T) {
 	pool := skipIfNoDB(t)
@@ -28,8 +47,8 @@ func TestFractionalIndex_Midpoint(t *testing.T) {
 	ctx := context.Background()
 
 	// Setup: buat board & column
-	wsID := uuid.New()
-	board, err := repo.CreateBoard(ctx, wsID, "Test Board", uuid.New())
+	userID, wsID := setupEnv(t, pool)
+	board, err := repo.CreateBoard(ctx, wsID, "Test Board", userID)
 	if err != nil {
 		t.Fatal("create board:", err)
 	}
@@ -39,18 +58,18 @@ func TestFractionalIndex_Midpoint(t *testing.T) {
 	}
 
 	// Insert task pertama di posisi 1000
-	t1, err := repo.CreateTask(ctx, col.ID, "Task 1", 1000, uuid.New(), nil, nil)
+	t1, err := repo.CreateTask(ctx, col.ID, "Task 1", 1000, userID, nil, nil)
 	if err != nil {
 		t.Fatal("create task 1:", err)
 	}
 	// Insert task kedua di posisi 2000
-	t2, err := repo.CreateTask(ctx, col.ID, "Task 2", 2000, uuid.New(), nil, nil)
+	t2, err := repo.CreateTask(ctx, col.ID, "Task 2", 2000, userID, nil, nil)
 	if err != nil {
 		t.Fatal("create task 2:", err)
 	}
 	// Insert task di tengah: posisi harus antara 1000 dan 2000
 	mid := (t1.Position + t2.Position) / 2
-	t3, err := repo.CreateTask(ctx, col.ID, "Task Mid", mid, uuid.New(), nil, nil)
+	t3, err := repo.CreateTask(ctx, col.ID, "Task Mid", mid, userID, nil, nil)
 	if err != nil {
 		t.Fatal("create task mid:", err)
 	}
@@ -66,8 +85,8 @@ func TestFractionalIndex_End(t *testing.T) {
 	repo := NewRepo(pool)
 	ctx := context.Background()
 
-	wsID := uuid.New()
-	board, err := repo.CreateBoard(ctx, wsID, "Test Board 2", uuid.New())
+	userID, wsID := setupEnv(t, pool)
+	board, err := repo.CreateBoard(ctx, wsID, "Test Board 2", userID)
 	if err != nil {
 		t.Fatal("create board:", err)
 	}
@@ -76,12 +95,12 @@ func TestFractionalIndex_End(t *testing.T) {
 		t.Fatal("create column:", err)
 	}
 
-	t1, err := repo.CreateTask(ctx, col.ID, "Task 1", 0, uuid.New(), nil, nil)
+	t1, err := repo.CreateTask(ctx, col.ID, "Task 1", 0, userID, nil, nil)
 	if err != nil {
 		t.Fatal("create task 1:", err)
 	}
 	// Task baru di ujung: posisi lebih besar dari t1
-	t2, err := repo.CreateTask(ctx, col.ID, "Task 2", t1.Position+1, uuid.New(), nil, nil)
+	t2, err := repo.CreateTask(ctx, col.ID, "Task 2", t1.Position+1, userID, nil, nil)
 	if err != nil {
 		t.Fatal("create task 2:", err)
 	}
@@ -97,8 +116,8 @@ func TestFractionalIndex_Repeated(t *testing.T) {
 	repo := NewRepo(pool)
 	ctx := context.Background()
 
-	wsID := uuid.New()
-	board, err := repo.CreateBoard(ctx, wsID, "Test Board 3", uuid.New())
+	userID, wsID := setupEnv(t, pool)
+	board, err := repo.CreateBoard(ctx, wsID, "Test Board 3", userID)
 	if err != nil {
 		t.Fatal("create board:", err)
 	}
@@ -116,7 +135,7 @@ func TestFractionalIndex_Repeated(t *testing.T) {
 		if len(tasks) > 0 {
 			pos = tasks[len(tasks)-1].Position + 1000
 		}
-		_, err = repo.CreateTask(ctx, col.ID, "Task", pos, uuid.New(), nil, nil)
+		_, err = repo.CreateTask(ctx, col.ID, "Task", pos, userID, nil, nil)
 		if err != nil {
 			t.Fatalf("create task %d: %v", i, err)
 		}
@@ -130,8 +149,8 @@ func TestOptimisticConcurrency_VersionConflict(t *testing.T) {
 	repo := NewRepo(pool)
 	ctx := context.Background()
 
-	wsID := uuid.New()
-	board, err := repo.CreateBoard(ctx, wsID, "Test Board 4", uuid.New())
+	userID, wsID := setupEnv(t, pool)
+	board, err := repo.CreateBoard(ctx, wsID, "Test Board 4", userID)
 	if err != nil {
 		t.Fatal("create board:", err)
 	}
@@ -140,7 +159,7 @@ func TestOptimisticConcurrency_VersionConflict(t *testing.T) {
 		t.Fatal("create column:", err)
 	}
 
-	task, err := repo.CreateTask(ctx, col.ID, "Task", 1000, uuid.New(), nil, nil)
+	task, err := repo.CreateTask(ctx, col.ID, "Task", 1000, userID, nil, nil)
 	if err != nil {
 		t.Fatal("create task:", err)
 	}
@@ -163,8 +182,8 @@ func TestUpdateColumn_Position(t *testing.T) {
 	repo := NewRepo(pool)
 	ctx := context.Background()
 
-	wsID := uuid.New()
-	board, err := repo.CreateBoard(ctx, wsID, "Test Board", uuid.New())
+	userID, wsID := setupEnv(t, pool)
+	board, err := repo.CreateBoard(ctx, wsID, "Test Board", userID)
 	if err != nil {
 		t.Fatal("create board:", err)
 	}
@@ -195,8 +214,8 @@ func TestUpdateColumn_Title(t *testing.T) {
 	repo := NewRepo(pool)
 	ctx := context.Background()
 
-	wsID := uuid.New()
-	board, err := repo.CreateBoard(ctx, wsID, "Test Board", uuid.New())
+	userID, wsID := setupEnv(t, pool)
+	board, err := repo.CreateBoard(ctx, wsID, "Test Board", userID)
 	if err != nil {
 		t.Fatal("create board:", err)
 	}
@@ -227,8 +246,8 @@ func TestWorkspaceIDLookup(t *testing.T) {
 	repo := NewRepo(pool)
 	ctx := context.Background()
 
-	wsID := uuid.New()
-	board, err := repo.CreateBoard(ctx, wsID, "Test Board", uuid.New())
+	userID, wsID := setupEnv(t, pool)
+	board, err := repo.CreateBoard(ctx, wsID, "Test Board", userID)
 	if err != nil {
 		t.Fatal("create board:", err)
 	}
@@ -236,7 +255,8 @@ func TestWorkspaceIDLookup(t *testing.T) {
 	if err != nil {
 		t.Fatal("create column:", err)
 	}
-	task, err := repo.CreateTask(ctx, col.ID, "Task", 1000, uuid.New(), nil, nil)
+
+	task, err := repo.CreateTask(ctx, col.ID, "Task", 1000, userID, nil, nil)
 	if err != nil {
 		t.Fatal("create task:", err)
 	}

@@ -17,6 +17,9 @@ import (
 
 var ErrNotFound = errors.New("workspace not found")
 
+// ErrInviteAccepted dipakai AcceptInvite untuk invite yang sudah dipakai.
+var ErrInviteAccepted = errors.New("invite already accepted")
+
 type MemberWithUser struct {
 	WorkspaceID uuid.UUID
 	UserID      uuid.UUID
@@ -200,9 +203,69 @@ type InviteDetail struct {
 	CreatedAt     time.Time
 }
 
+// ListPendingInvites mengembalikan semua invite yang belum di-accept untuk user (by email).
+func (r *Repo) ListPendingInvites(ctx context.Context, email string) ([]*InviteDetail, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT wi.id, wi.workspace_id, w.name, wi.email, wi.role, wi.token,
+			   wi.invited_by, u.name, wi.accepted, wi.expires_at, wi.created_at
+		FROM workspace_invites wi
+		JOIN workspaces w ON w.id = wi.workspace_id
+		LEFT JOIN users u ON u.id = wi.invited_by
+		WHERE wi.email = $1 AND wi.accepted = false AND wi.expires_at > now()
+		ORDER BY wi.created_at DESC`, email)
+	if err != nil {
+		return nil, fmt.Errorf("list pending invites: %w", err)
+	}
+	defer rows.Close()
+
+	var invites []*InviteDetail
+	for rows.Next() {
+		d := &InviteDetail{}
+		if err := rows.Scan(&d.ID, &d.WorkspaceID, &d.WorkspaceName, &d.Email, &d.Role, &d.Token,
+			&d.InvitedByID, &d.InvitedByName, &d.Accepted, &d.ExpiresAt, &d.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan invite: %w", err)
+		}
+		invites = append(invites, d)
+	}
+	return invites, rows.Err()
+}
+
 // CreateInvite buat invite link token.
 func (r *Repo) CreateInvite(ctx context.Context, workspaceID uuid.UUID, email, role string, token string, expiresAt time.Time, invitedBy uuid.UUID) error {
-	_, err := r.pool.Exec(ctx, `
+	// Check if there's already a pending invite for this email in this workspace
+	var existingID uuid.UUID
+	err := r.pool.QueryRow(ctx, `
+		SELECT id FROM workspace_invites 
+		WHERE workspace_id = $1 AND email = $2 AND accepted = false AND expires_at > now()`,
+		workspaceID, email,
+	).Scan(&existingID)
+	
+	if err == nil {
+		// Pending invite exists, delete it and create new one
+		_, _ = r.pool.Exec(ctx, `DELETE FROM workspace_invites WHERE id = $1`, existingID)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("check existing invite: %w", err)
+	}
+	
+	// Check if user is already a member
+	var memberExists bool
+	err = r.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM workspace_members wm
+			JOIN users u ON u.id = wm.user_id
+			WHERE wm.workspace_id = $1 AND u.email = $2
+		)`, workspaceID, email,
+	).Scan(&memberExists)
+	
+	if err != nil {
+		return fmt.Errorf("check member exists: %w", err)
+	}
+	
+	if memberExists {
+		return fmt.Errorf("user with email %s is already a member of this workspace", email)
+	}
+	
+	_, err = r.pool.Exec(ctx, `
 		INSERT INTO workspace_invites (workspace_id, email, role, token, expires_at, invited_by)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		workspaceID, email, role, token, expiresAt, invitedBy)
@@ -244,10 +307,11 @@ func (r *Repo) AcceptInvite(ctx context.Context, token string, userID uuid.UUID)
 	var wsID uuid.UUID
 	var role string
 	var accepted bool
+	var inviteEmail string
 	err = tx.QueryRow(ctx, `
-		SELECT workspace_id, role, accepted FROM workspace_invites
+		SELECT workspace_id, role, accepted, email FROM workspace_invites
 		WHERE token = $1 AND expires_at > now()
-		FOR UPDATE`, token).Scan(&wsID, &role, &accepted)
+		FOR UPDATE`, token).Scan(&wsID, &role, &accepted, &inviteEmail)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
@@ -255,7 +319,23 @@ func (r *Repo) AcceptInvite(ctx context.Context, token string, userID uuid.UUID)
 		return fmt.Errorf("select invite: %w", err)
 	}
 	if accepted {
-		return fmt.Errorf("invite already accepted")
+		return ErrInviteAccepted
+	}
+
+	// Validate that the user's email matches the invite email
+	var userEmail string
+	err = tx.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&userEmail)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("user not found")
+		}
+		return fmt.Errorf("get user email: %w", err)
+	}
+
+	// Case-insensitive email comparison (both columns are CITEXT in database)
+	// Using strings.EqualFold as additional safety for case-insensitive comparison
+	if !strings.EqualFold(userEmail, inviteEmail) {
+		return fmt.Errorf("this invitation is for %s, but you are logged in as %s", inviteEmail, userEmail)
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -269,6 +349,103 @@ func (r *Repo) AcceptInvite(ctx context.Context, token string, userID uuid.UUID)
 		return fmt.Errorf("add member: %w", err)
 	}
 	return tx.Commit(ctx)
+}
+
+// RejectInvite menolak undangan dengan menandai sebagai rejected atau menghapusnya.
+func (r *Repo) RejectInvite(ctx context.Context, token string, userID uuid.UUID) error {
+	// Verifikasi bahwa invite untuk user ini (by email) dan belum accepted
+	var inviteEmail string
+	var accepted bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT wi.email, wi.accepted
+		FROM workspace_invites wi
+		WHERE wi.token = $1 AND wi.expires_at > now()`,
+		token,
+	).Scan(&inviteEmail, &accepted)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("get invite: %w", err)
+	}
+	if accepted {
+		return ErrInviteAccepted
+	}
+
+	// Validate that the user's email matches the invite email
+	var userEmail string
+	err = r.pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&userEmail)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("user not found")
+		}
+		return fmt.Errorf("get user email: %w", err)
+	}
+
+	// Case-insensitive email comparison (both columns are CITEXT in database)
+	// Using strings.EqualFold as additional safety for case-insensitive comparison
+	if !strings.EqualFold(userEmail, inviteEmail) {
+		return fmt.Errorf("this invitation is for %s, but you are logged in as %s", inviteEmail, userEmail)
+	}
+
+	// Hapus invite (reject = delete)
+	ct, err := r.pool.Exec(ctx, `
+		DELETE FROM workspace_invites
+		WHERE token = $1`,
+		token,
+	)
+	if err != nil {
+		return fmt.Errorf("reject invite: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteInvite menghapus invite (hanya untuk owner workspace).
+func (r *Repo) DeleteInvite(ctx context.Context, workspaceID, inviteID uuid.UUID) error {
+	ct, err := r.pool.Exec(ctx, `
+		DELETE FROM workspace_invites
+		WHERE id = $1 AND workspace_id = $2`,
+		inviteID, workspaceID,
+	)
+	if err != nil {
+		return fmt.Errorf("delete invite: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ListWorkspaceInvites mengembalikan semua invite untuk workspace (owner only).
+func (r *Repo) ListWorkspaceInvites(ctx context.Context, workspaceID uuid.UUID) ([]*InviteDetail, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT wi.id, wi.workspace_id, w.name, wi.email, wi.role, wi.token,
+		       wi.invited_by, u.name, wi.accepted, wi.expires_at, wi.created_at
+		FROM workspace_invites wi
+		JOIN workspaces w ON w.id = wi.workspace_id
+		LEFT JOIN users u ON u.id = wi.invited_by
+		WHERE wi.workspace_id = $1
+		ORDER BY wi.created_at DESC`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list workspace invites: %w", err)
+	}
+	defer rows.Close()
+
+	var invites []*InviteDetail
+	for rows.Next() {
+		d := &InviteDetail{}
+		if err := rows.Scan(&d.ID, &d.WorkspaceID, &d.WorkspaceName, &d.Email, &d.Role, &d.Token,
+			&d.InvitedByID, &d.InvitedByName, &d.Accepted, &d.ExpiresAt, &d.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan invite: %w", err)
+		}
+		invites = append(invites, d)
+	}
+	return invites, rows.Err()
 }
 
 func (r *Repo) GetMemberRole(ctx context.Context, workspaceID, userID uuid.UUID) (string, error) {

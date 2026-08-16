@@ -92,3 +92,16 @@ func (r *Repo) UpdateName(ctx context.Context, id uuid.UUID, name string) error 
 	}
 	return nil
 }
+
+// GetEmailByID mendapatkan email user berdasarkan ID.
+func (r *Repo) GetEmailByID(ctx context.Context, id uuid.UUID) (string, error) {
+	var email string
+	err := r.pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, id).Scan(&email)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("get email by id: %w", err)
+	}
+	return email, nil
+}

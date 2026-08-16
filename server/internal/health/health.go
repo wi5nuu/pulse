@@ -52,7 +52,9 @@ func checkDB(ctx context.Context, db *sql.DB) ComponentStatus {
 	defer cancel()
 	start := time.Now()
 	if err := db.PingContext(cctx); err != nil {
-		return ComponentStatus{Status: StatusDown, Error: err.Error()}
+		// JANGAN expose err.Error() — bisa bocorkan host/kredensial DB
+		// (fix audit). Detail di log server saja.
+		return ComponentStatus{Status: StatusDown, Error: "database unavailable"}
 	}
 	return ComponentStatus{Status: StatusOK, LatencyMS: time.Since(start).Milliseconds()}
 }
@@ -62,7 +64,7 @@ func checkRedis(ctx context.Context, rdb *redis.Client) ComponentStatus {
 	defer cancel()
 	start := time.Now()
 	if err := rdb.Ping(cctx).Err(); err != nil {
-		return ComponentStatus{Status: StatusDown, Error: err.Error()}
+		return ComponentStatus{Status: StatusDown, Error: "redis unavailable"}
 	}
 	return ComponentStatus{Status: StatusOK, LatencyMS: time.Since(start).Milliseconds()}
 }
