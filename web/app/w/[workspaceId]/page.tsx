@@ -1,9 +1,6 @@
 'use client'
 
-import { useParams } from 'next/navigation'
-
 export default function WorkspaceHomePage() {
-  const params = useParams()
 
   return (
     <div className="flex-1 flex items-center justify-center text-gray-400">

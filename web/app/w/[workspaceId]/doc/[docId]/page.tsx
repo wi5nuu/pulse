@@ -1,23 +1,29 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
-import { useParams } from 'next/navigation'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useParams, useSearchParams } from 'next/navigation'
 import { EditorView } from 'prosemirror-view'
-import { EditorState } from 'prosemirror-state'
-import { Schema } from 'prosemirror-model'
-import { schema as basicSchema } from 'prosemirror-schema-basic'
-import { addListNodes } from 'prosemirror-schema-list'
-import { exampleSetup } from 'prosemirror-example-setup'
+import { EditorState, type Command } from 'prosemirror-state'
+import { keymap } from 'prosemirror-keymap'
+import { baseKeymap, toggleMark } from 'prosemirror-commands'
+import { splitListItem } from 'prosemirror-schema-list'
+import { buildKeymap, buildInputRules } from 'prosemirror-example-setup'
+import { dropCursor } from 'prosemirror-dropcursor'
+import { gapCursor } from 'prosemirror-gapcursor'
+import { columnResizing, tableEditing, goToNextCell } from 'prosemirror-tables'
+import { undoCommand, redoCommand } from 'y-prosemirror'
 import * as Y from 'yjs'
 import { ySyncPlugin, yUndoPlugin, yCursorPlugin } from 'y-prosemirror'
-import { PulseWSProvider, ConnectionStatus } from '@/lib/yjs-provider'
+import { PulseWSProvider, ConnectionStatus, type WSRole } from '@/lib/yjs-provider'
 import { WS_BASE } from '@/lib/api-client'
 import { useAuthStore } from '@/store/auth'
-
-const schema = new Schema({
-  nodes: addListNodes(basicSchema.spec.nodes, 'paragraph block*', 'block'),
-  marks: basicSchema.spec.marks,
-})
+import { ShareDocumentModal } from '@/components/share-document-modal'
+import EditorToolbar from '@/components/editor-toolbar'
+import FindReplaceBar from '@/components/find-replace'
+import OutlinePanel from '@/components/outline-panel'
+import CommentsPanel from '@/components/comments-panel'
+import { schema } from '@/lib/editor/schema'
+import { docStats, ancestorsOf } from '@/lib/editor/commands'
 
 const cursorColors = [
   '#6366f1', '#ef4444', '#22c55e', '#f59e0b', '#ec4899',
@@ -26,7 +32,9 @@ const cursorColors = [
 
 export default function DocEditorPage() {
   const params = useParams()
+  const searchParams = useSearchParams()
   const docId = params.docId as string
+  const lsToken = searchParams.get('ls')
   const user = useAuthStore((s) => s.user)
   const editorRef = useRef<HTMLDivElement>(null)
   const providerRef = useRef<PulseWSProvider | null>(null)
@@ -34,14 +42,34 @@ export default function DocEditorPage() {
   const viewRef = useRef<EditorView | null>(null)
   const [connStatus, setConnStatus] = useState(ConnectionStatus.Disconnected)
   const [users, setUsers] = useState<{ name: string; color: string }[]>([])
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false)
+  const [wsRole, setWsRole] = useState<WSRole | null>(null)
+  const [showFind, setShowFind] = useState(false)
+  const [showOutline, setShowOutline] = useState(false)
+  const [showComments, setShowComments] = useState(false)
+  const [stats, setStats] = useState({ words: 0, chars: 0, charsNoSpaces: 0, paragraphs: 0 })
+  const [, forceRender] = useState(0)
+  const toggleFindRef = useRef<() => void>(() => {})
+  const isReadOnly = wsRole === 'viewer' || wsRole === 'view'
+  const readOnlyRef = useRef(false)
+  readOnlyRef.current = isReadOnly
+  const userRef = useRef(user)
+  userRef.current = user
+
+  const bump = useCallback(() => forceRender((n) => n + 1), [])
 
   useEffect(() => {
-    if (!user || !docId) return
+    toggleFindRef.current = () => setShowFind((v) => !v)
+  }, [])
+
+  useEffect(() => {
+    const currentUser = userRef.current
+    if (!currentUser || !docId) return
 
     const ydoc = new Y.Doc()
     ydocRef.current = ydoc
 
-    const wsUrl = `${WS_BASE}/ws/doc/${docId}`
+    const wsUrl = `${WS_BASE}/ws/doc/${docId}${lsToken ? `?ls=${lsToken}` : ''}`
     const provider = new PulseWSProvider(ydoc, wsUrl)
     providerRef.current = provider
 
@@ -49,12 +77,16 @@ export default function DocEditorPage() {
       setConnStatus(status)
     })
 
+    const unsubRole = provider.onRole((role) => {
+      setWsRole(role)
+    })
+
     provider.connect()
 
     const awareness = provider.awareness
     awareness.setLocalState({
       user: {
-        name: user.name,
+        name: currentUser.name,
         color: cursorColors[Math.floor(Math.random() * cursorColors.length)],
       },
     })
@@ -73,37 +105,104 @@ export default function DocEditorPage() {
 
     const yXmlFragment = ydoc.getXmlFragment('prosemirror')
 
+    // Toggle link via prompt (E.98 / R.301 Ctrl+K).
+    const toggleLinkCommand = () => {
+      const view = viewRef.current
+      if (!view) return false
+      const current = view.state.selection.$from.marks().find((m) => m.type.name === 'link')?.attrs.href as string | undefined
+      const url = window.prompt('Link URL (kosongkan untuk hapus):', current ?? 'https://')
+      if (url === null) return true
+      const mark = view.state.schema.marks.link
+      toggleMark(mark, url.trim() === '' || url.trim() === 'https://' ? null : { href: url.trim(), title: null })(view.state, view.dispatch)
+      view.focus()
+      return true
+    }
+
+    const keymaps = buildKeymap(schema, { 'Mod-z': false, 'Mod-y': false, 'Mod-Shift-z': false })
+
+    const toggleMarkWith = (markName: string): Command => (state, dispatch) => {
+      const mark = schema.marks[markName]
+      if (!mark) return false
+      return toggleMark(mark)(state, dispatch)
+    }
+
     const plugins = [
-      ...exampleSetup({ schema }),
       ySyncPlugin(yXmlFragment),
-      yUndoPlugin({ trackedOrigins: [user.id] }),
+      yUndoPlugin({ trackedOrigins: [currentUser.id] }),
       yCursorPlugin(awareness),
+      buildInputRules(schema),
+      keymap({
+        ...keymaps,
+        'Mod-z': undoCommand,
+        'Mod-y': redoCommand,
+        'Mod-Shift-z': redoCommand,
+        'Mod-f': () => { toggleFindRef.current(); return true },
+        'Mod-h': () => { toggleFindRef.current(); return true },
+        'Mod-k': toggleLinkCommand,
+        'Ctrl-.': toggleMarkWith('superscript'),
+        'Ctrl-,': toggleMarkWith('subscript'),
+        'Alt-Shift-5': toggleMarkWith('strike'),
+        'Tab': goToNextCell(1),
+        'Shift-Tab': goToNextCell(-1),
+        'Enter': splitListItemCmd,
+      }),
+      keymap(baseKeymap),
+      dropCursor(),
+      gapCursor(),
+      columnResizing(),
+      tableEditing(),
     ]
 
-    const state = EditorState.create({
-      schema,
-      plugins,
-    })
+    const state = EditorState.create({ schema, plugins })
 
     if (editorRef.current) {
       let view: EditorView | undefined
       view = new EditorView(editorRef.current, {
         state,
+        editable: () => !readOnlyRef.current,
+        handleClick(_v, pos, event) {
+          // Checklist interaktif (C.57): klik checkbox → toggle attr.
+          const target = event.target as HTMLElement
+          if (target.classList.contains('pm-task-checkbox')) {
+            event.preventDefault()
+            const $pos = view!.state.doc.resolve(pos)
+            const ancestors = ancestorsOf($pos)
+            const idx = ancestors.findIndex((n) => n.type.name === 'list_item')
+            if (idx >= 0 && ancestors[idx].attrs.checked !== null) {
+              const tr = view!.state.tr
+              tr.setNodeMarkup($pos.before(idx + 1), undefined, { ...ancestors[idx].attrs, checked: !ancestors[idx].attrs.checked })
+              view!.dispatch(tr)
+            }
+            return true
+          }
+          return false
+        },
         dispatchTransaction(tr) {
           if (!view) return
           const newState = view.state.apply(tr)
           view.updateState(newState)
+          // Word count live (K.215) + toolbar state update.
+          setStats(docStats(newState))
+          bump()
         },
       })
       viewRef.current = view
+      setStats(docStats(view.state))
     }
 
     return () => {
-      provider.disconnect()
+      awareness.off('change', onAwarenessChange)
+      unsubRole()
       viewRef.current?.destroy()
+      viewRef.current = null
+      provider.disconnect()
+      provider.destroy()
       ydoc.destroy()
+      ydocRef.current = null
+      providerRef.current = null
     }
-  }, [docId, user])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docId, lsToken])
 
   const statusColors: Record<ConnectionStatus, string> = {
     [ConnectionStatus.Connected]: 'bg-green-500',
@@ -121,6 +220,11 @@ export default function DocEditorPage() {
 
   return (
     <div className="flex-1 flex flex-col">
+      {isReadOnly && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-1.5 text-xs text-amber-700 text-center">
+          View only — you don&apos;t have edit access to this document.
+        </div>
+      )}
       <header className="border-b px-4 py-2 flex items-center justify-between bg-white">
         <div className="flex items-center gap-3">
           <span className="text-sm font-medium">Document</span>
@@ -130,14 +234,70 @@ export default function DocEditorPage() {
             </span>
           ))}
         </div>
-        <div className="flex items-center gap-2">
-          <span className={`inline-block w-2 h-2 rounded-full ${statusColors[connStatus]}`} />
-          <span className="text-xs text-gray-500">{statusLabels[connStatus]}</span>
+        <div className="flex items-center gap-3">
+          {!isReadOnly && (
+            <button
+              onClick={() => setIsShareModalOpen(true)}
+              className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors"
+            >
+              Share
+            </button>
+          )}
+          <div className="flex items-center gap-2">
+            <span className={`inline-block w-2 h-2 rounded-full ${statusColors[connStatus]}`} />
+            <span className="text-xs text-gray-500">{statusLabels[connStatus]}</span>
+          </div>
         </div>
       </header>
-      <div className="flex-1 overflow-y-auto px-8 py-4">
-        <div ref={editorRef} className="ProseMirror-container max-w-3xl mx-auto" />
+
+      <EditorToolbar
+        view={viewRef.current}
+        readOnly={isReadOnly}
+        onToggleFind={() => setShowFind((v) => !v)}
+        onToggleOutline={() => setShowOutline((v) => !v)}
+        onToggleComments={() => setShowComments((v) => !v)}
+        commentsActive={showComments}
+        outlineActive={showOutline}
+        findActive={showFind}
+      />
+
+      {showFind && <FindReplaceBar view={viewRef.current} onClose={() => setShowFind(false)} />}
+
+      <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 overflow-y-auto px-8 py-4">
+          <div ref={editorRef} className="ProseMirror-container max-w-3xl mx-auto" />
+        </div>
+        {showOutline && <OutlinePanel view={viewRef.current} onClose={() => setShowOutline(false)} />}
+        {showComments && (
+          <CommentsPanel
+            docId={docId}
+            view={viewRef.current}
+            userId={user?.id ?? ''}
+            readOnly={isReadOnly}
+            provider={providerRef.current}
+            onClose={() => setShowComments(false)}
+          />
+        )}
       </div>
+
+      <footer className="border-t bg-white px-4 py-1.5 flex items-center gap-4 text-xs text-gray-500">
+        <span>{stats.words} words</span>
+        <span>{stats.chars} chars</span>
+        <span>{stats.charsNoSpaces} chars (no spaces)</span>
+        <span>{stats.paragraphs} paragraphs</span>
+        <span className="flex-1" />
+        <span>{users.length} online</span>
+      </footer>
+
+      <ShareDocumentModal
+        documentId={docId}
+        isOpen={isShareModalOpen}
+        onClose={() => setIsShareModalOpen(false)}
+      />
     </div>
   )
+}
+
+function splitListItemCmd(state: EditorState, dispatch?: (tr: import('prosemirror-state').Transaction) => void): boolean {
+  return splitListItem(state.schema.nodes.list_item as never)(state, dispatch as never)
 }

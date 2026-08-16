@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef, type MutableRefObject } from 'react'
 import { useParams } from 'next/navigation'
-import { apiGet, apiPost, apiPatch, apiDelete, getAccessToken, WS_BASE } from '@/lib/api-client'
+import { apiGet, apiPost, apiPatch, apiDelete, getAccessToken, refreshAccessToken, notifySessionExpired, WS_BASE } from '@/lib/api-client'
 import toast from 'react-hot-toast'
 
 interface Column {
@@ -41,6 +41,9 @@ export default function BoardPage() {
   const wsRef = useRef<WebSocket | null>(null)
   const wsReconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const wsAttemptsRef = useRef(0)
+  const wsPingRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const wsLastMsgRef = useRef(0)
+  const disposedRef = useRef(false)
   const taskRefs = useRef(new Map<string, HTMLDivElement>()) as MutableRefObject<Map<string, HTMLDivElement>>
   const colRefs = useRef(new Map<string, HTMLDivElement>()) as MutableRefObject<Map<string, HTMLDivElement>>
 
@@ -69,6 +72,7 @@ export default function BoardPage() {
 
   // WebSocket with exponential backoff reconnection
   const connectWS = useCallback(() => {
+    if (disposedRef.current) return
     const token = getAccessToken()
     if (!token || !boardId) return
 
@@ -77,6 +81,7 @@ export default function BoardPage() {
     wsRef.current = ws
 
     ws.onmessage = (event) => {
+      wsLastMsgRef.current = Date.now()
       try {
         const msg = JSON.parse(event.data)
         if (msg.type === 'task_updated' || msg.type === 'task_created' || msg.type === 'task_deleted' ||
@@ -90,25 +95,72 @@ export default function BoardPage() {
 
     ws.onopen = () => {
       wsAttemptsRef.current = 0
+      wsLastMsgRef.current = Date.now()
+      // FIX M3: server memutus koneksi board setelah 90s idle (read deadline)
+      // karena tidak ada traffic. Kirim ping 30s + deteksi koneksi zombie:
+      // jika tidak ada pesan dari server dalam 75s, tutup paksa → reconnect.
+      if (wsPingRef.current) clearInterval(wsPingRef.current)
+      wsPingRef.current = setInterval(() => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'ping' }))
+          if (Date.now() - wsLastMsgRef.current > 75000) {
+            wsRef.current.close()
+          }
+        }
+      }, 30000)
+      // FIX: setelah reconnect, muat ulang board — perubahan user lain yang
+      // terjadi saat koneksi putus tidak ter-refetch sampai ada broadcast.
+      loadBoard()
     }
 
     ws.onclose = () => {
       wsRef.current = null
+      if (wsPingRef.current) {
+        clearInterval(wsPingRef.current)
+        wsPingRef.current = null
+      }
+      if (wsReconnectRef.current) {
+        clearTimeout(wsReconnectRef.current)
+        wsReconnectRef.current = null
+      }
+      // Setelah unmount jangan reconnect — kalau tidak, tiap kunjungan
+      // membocorkan satu WebSocket + timer yang hidup terus.
+      if (disposedRef.current) return
       const delay = Math.min(
         BASE_RECONNECT_DELAY * Math.pow(2, wsAttemptsRef.current),
         MAX_RECONNECT_DELAY,
       )
       wsAttemptsRef.current++
-      wsReconnectRef.current = setTimeout(connectWS, delay)
+      // FIX race: refresh token harus selesai SEBELUM reconnect — bukan
+      // fire-and-forget yang bisa membuat reconnect pakai token basi.
+      wsReconnectRef.current = setTimeout(async () => {
+        if (wsAttemptsRef.current > 0 && wsAttemptsRef.current % 3 === 0) {
+          const token = await refreshAccessToken()
+          if (!token) {
+            // Session mati — berhenti reconnect + trigger logout global.
+            disposedRef.current = true
+            notifySessionExpired()
+            return
+          }
+        }
+        connectWS()
+      }, delay)
     }
 
     return ws
   }, [boardId, loadBoard])
 
   useEffect(() => {
+    disposedRef.current = false
     const ws = connectWS()
     return () => {
+      disposedRef.current = true
       if (wsReconnectRef.current) clearTimeout(wsReconnectRef.current)
+      wsReconnectRef.current = null
+      if (wsPingRef.current) {
+        clearInterval(wsPingRef.current)
+        wsPingRef.current = null
+      }
       if (ws) ws.close()
       wsRef.current = null
       wsAttemptsRef.current = 0
@@ -201,12 +253,12 @@ export default function BoardPage() {
     e.preventDefault()
     if (!draggedCol || draggedCol === colId) { setDraggedCol(null); setDragOverCol(null); return }
 
-    const sorted = columns.sort((a, b) => a.position - b.position)
+    // Jangan mutate state array in-place (columns.sort memutasi array React state).
+    const sorted = [...columns].sort((a, b) => a.position - b.position)
     const fromIdx = sorted.findIndex((c) => c.id === draggedCol)
     const toIdx = sorted.findIndex((c) => c.id === colId)
     if (fromIdx === -1 || toIdx === -1) { setDraggedCol(null); setDragOverCol(null); return }
 
-    const col = sorted[fromIdx]
     let newPos: number
     if (toIdx === 0) {
       newPos = sorted[0].position / 2
@@ -436,10 +488,18 @@ export default function BoardPage() {
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
           onClick={() => setModal(null)}
+          role="presentation"
         >
           <div
             className="bg-white rounded shadow-lg w-full max-w-sm p-6"
+            role="dialog"
+            aria-modal="true"
+            aria-label={modal === 'addTask' ? 'Add task' : modal === 'editTask' ? 'Edit task' : 'Confirm deletion'}
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              // FIX aksesibilitas: Escape menutup modal (sebelumnya tidak ada).
+              if (e.key === 'Escape') setModal(null)
+            }}
           >
             {modal === 'addTask' && (
               <>

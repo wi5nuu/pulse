@@ -16,13 +16,17 @@ export default function HistoryPage() {
   const docId = params.docId as string
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
   const [restoringId, setRestoringId] = useState<number | null>(null)
   const [confirmId, setConfirmId] = useState<number | null>(null)
 
   useEffect(() => {
     apiGet<{ snapshots: Snapshot[] }>(`/api/documents/${docId}/snapshots`)
       .then((data) => setSnapshots(data.snapshots))
-      .catch(() => toast.error('Failed to load history'))
+      .catch((err: any) => {
+        // FIX: gagal fetch tidak boleh tampil sebagai empty state.
+        setLoadError(err.message || 'Failed to load history')
+      })
       .finally(() => setLoading(false))
   }, [docId])
 
@@ -47,6 +51,13 @@ export default function HistoryPage() {
           {[1, 2, 3].map((i) => (
             <div key={i} className="skeleton h-12 w-full" />
           ))}
+        </div>
+      ) : loadError ? (
+        <div className="text-center py-12">
+          <p className="text-red-600 mb-2">{loadError}</p>
+          <button className="btn-secondary" onClick={() => window.location.reload()}>
+            Retry
+          </button>
         </div>
       ) : snapshots.length === 0 ? (
         <div className="text-center py-12 text-gray-400">

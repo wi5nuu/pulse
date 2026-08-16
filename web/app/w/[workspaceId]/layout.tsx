@@ -5,6 +5,7 @@ import { useParams, useRouter, usePathname } from 'next/navigation'
 import { AuthGuard } from '@/components/auth-guard'
 import { useAuthStore } from '@/store/auth'
 import { apiGet, apiPost, logout } from '@/lib/api-client'
+import { DocSidebarItem } from '@/components/doc-sidebar-item'
 import toast from 'react-hot-toast'
 
 interface WorkspaceData {
@@ -27,12 +28,12 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
   const router = useRouter()
   const pathname = usePathname()
   const workspaceId = params.workspaceId as string
-  const user = useAuthStore((s) => s.user)
   const clear = useAuthStore((s) => s.clear)
 
   const [ws, setWs] = useState<WorkspaceData | null>(null)
   const [docs, setDocs] = useState<DocSummary[]>([])
   const [boards, setBoards] = useState<BoardSummary[]>([])
+  const [sharedDocs, setSharedDocs] = useState<DocSummary[]>([])
 
   useEffect(() => {
     if (!workspaceId) return
@@ -46,6 +47,10 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
 
     apiGet<{ boards: BoardSummary[] }>(`/api/workspaces/${workspaceId}/boards`)
       .then((data) => setBoards(data.boards))
+      .catch(() => {})
+
+    apiGet<{ documents: DocSummary[] }>('/api/documents/shared')
+      .then((data) => setSharedDocs(data.documents))
       .catch(() => {})
   }, [workspaceId])
 
@@ -104,17 +109,36 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
                 <p className="text-xs text-gray-400 pl-2">No documents</p>
               )}
               {docs.map((d) => (
-                <button
+                <DocSidebarItem
                   key={d.id}
-                  className={`w-full text-left text-sm px-2 py-1.5 rounded hover:bg-gray-200 transition-colors truncate ${
-                    pathname.includes(`/doc/${d.id}`) ? 'bg-gray-200 font-medium' : ''
-                  }`}
-                  onClick={() => router.push(`/w/${workspaceId}/doc/${d.id}`)}
-                >
-                  {d.title}
-                </button>
+                  workspaceId={workspaceId}
+                  doc={d}
+                  onRenamed={(id, title) =>
+                    setDocs((prev) => prev.map((x) => (x.id === id ? { ...x, title } : x)))
+                  }
+                />
               ))}
             </div>
+
+            {sharedDocs.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Shared with me
+                  </span>
+                </div>
+                {sharedDocs.map((d) => (
+                  <DocSidebarItem
+                    key={d.id}
+                    workspaceId={workspaceId}
+                    doc={d}
+                    onRenamed={(id, title) =>
+                      setSharedDocs((prev) => prev.map((x) => (x.id === id ? { ...x, title } : x)))
+                    }
+                  />
+                ))}
+              </div>
+            )}
 
             <div>
               <div className="flex items-center justify-between mb-2">

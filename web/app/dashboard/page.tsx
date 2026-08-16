@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AuthGuard } from '@/components/auth-guard'
+import { InviteNotifications } from '@/components/invite-notifications'
 import { useAuthStore } from '@/store/auth'
 import { apiGet, apiPost, logout } from '@/lib/api-client'
 import toast from 'react-hot-toast'
@@ -19,15 +20,27 @@ export default function DashboardPage() {
   const clear = useAuthStore((s) => s.clear)
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
   const [showCreate, setShowCreate] = useState(false)
   const [newName, setNewName] = useState('')
 
-  useEffect(() => {
-    apiGet<{ workspaces: Workspace[] }>('/api/workspaces')
-      .then((data) => setWorkspaces(data.workspaces))
-      .catch(() => toast.error('Failed to load workspaces'))
-      .finally(() => setLoading(false))
+  const loadWorkspaces = useCallback(async () => {
+    try {
+      setLoadError('')
+      const data = await apiGet<{ workspaces: Workspace[] }>('/api/workspaces')
+      setWorkspaces(data.workspaces)
+    } catch (err: any) {
+      // FIX: bedakan error state dari empty state — gagal fetch tidak boleh
+      // tampil sebagai "No workspaces yet".
+      setLoadError(err.message || 'Failed to load workspaces')
+    } finally {
+      setLoading(false)
+    }
   }, [])
+
+  useEffect(() => {
+    loadWorkspaces()
+  }, [loadWorkspaces])
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -54,6 +67,7 @@ export default function DashboardPage() {
         <header className="border-b bg-white px-6 py-3 flex items-center justify-between">
           <h1 className="text-lg font-semibold">Pulse</h1>
           <div className="flex items-center gap-3">
+            <InviteNotifications />
             <span className="text-sm text-gray-500">{user?.email}</span>
             <button className="btn-ghost text-sm" onClick={handleLogout}>
               Sign out
@@ -92,6 +106,13 @@ export default function DashboardPage() {
               {[1, 2, 3].map((i) => (
                 <div key={i} className="skeleton h-16 w-full" />
               ))}
+            </div>
+          ) : loadError ? (
+            <div className="card text-center py-12 border-red-200">
+              <p className="text-red-600 mb-2">{loadError}</p>
+              <button className="btn-secondary" onClick={loadWorkspaces}>
+                Retry
+              </button>
             </div>
           ) : workspaces.length === 0 ? (
             <div className="card text-center py-12">

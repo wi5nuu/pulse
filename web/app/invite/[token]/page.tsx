@@ -25,6 +25,7 @@ export default function InvitePage() {
   const [fetching, setFetching] = useState(true)
   const [error, setError] = useState('')
   const [accepting, setAccepting] = useState(false)
+  const [rejecting, setRejecting] = useState(false)
 
   useEffect(() => {
     restoreSession()
@@ -57,6 +58,19 @@ export default function InvitePage() {
     }
   }
 
+  const handleReject = async () => {
+    setRejecting(true)
+    try {
+      await apiPost(`/invites/${token}/reject`)
+      toast.success('Invitation rejected')
+      router.push('/dashboard')
+    } catch (err: any) {
+      toast.error(err.message)
+    } finally {
+      setRejecting(false)
+    }
+  }
+
   if (fetching) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
@@ -84,9 +98,9 @@ export default function InvitePage() {
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="card max-w-sm w-full text-center">
           <h1 className="text-xl font-semibold mb-2">Already Accepted</h1>
-          <p className="text-sm text-gray-500 mb-4">This invite has already been used.</p>
-          <button className="btn-primary" onClick={() => router.push('/dashboard')}>
-            Go to Dashboard
+          <p className="text-sm text-gray-500 mb-4">This invitation has already been accepted.</p>
+          <button className="btn-primary" onClick={() => router.push(`/w/${invite.workspaceId}`)}>
+            Go to Workspace
           </button>
         </div>
       </div>
@@ -105,16 +119,10 @@ export default function InvitePage() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="card max-w-sm w-full text-center">
-          <h1 className="text-xl font-semibold mb-2">You're Invited!</h1>
-          <p className="text-sm text-gray-600 mb-1">
-            <strong>{invite.workspaceName}</strong>
+          <h1 className="text-xl font-semibold mb-2">Sign In Required</h1>
+          <p className="text-sm text-gray-500 mb-4">
+            You need to be signed in to accept this invitation.
           </p>
-          {invite.invitedByName && (
-            <p className="text-sm text-gray-500 mb-4">
-              Invited by <strong>{invite.invitedByName}</strong> as <strong>{invite.role}</strong>
-            </p>
-          )}
-          <p className="text-sm text-gray-400 mb-4">Sign in to accept this invitation.</p>
           <button
             className="btn-primary"
             onClick={() => router.push(`/login?redirect=/invite/${token}`)}
@@ -129,7 +137,7 @@ export default function InvitePage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
       <div className="card max-w-sm w-full text-center">
-        <h1 className="text-xl font-semibold mb-2">You're Invited!</h1>
+        <h1 className="text-xl font-semibold mb-2">You&apos;re Invited!</h1>
         <p className="text-sm text-gray-600 mb-1">
           Join <strong>{invite.workspaceName}</strong>
         </p>
@@ -138,9 +146,22 @@ export default function InvitePage() {
             Invited by <strong>{invite.invitedByName}</strong> as <strong>{invite.role}</strong>
           </p>
         )}
-        <button className="btn-primary w-full" onClick={handleAccept} disabled={accepting}>
-          {accepting ? 'Joining...' : 'Accept Invite'}
-        </button>
+        <div className="flex gap-2 mt-4">
+          <button 
+            className="btn-ghost flex-1" 
+            onClick={handleReject} 
+            disabled={rejecting || accepting}
+          >
+            {rejecting ? 'Rejecting...' : 'Decline'}
+          </button>
+          <button 
+            className="btn-primary flex-1" 
+            onClick={handleAccept} 
+            disabled={accepting || rejecting}
+          >
+            {accepting ? 'Joining...' : 'Accept Invite'}
+          </button>
+        </div>
       </div>
     </div>
   )
