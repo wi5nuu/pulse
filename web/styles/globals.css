@@ -69,6 +69,56 @@
 .ProseMirror hr { @apply border-gray-200 my-4; }
 .ProseMirror img { @apply max-w-full h-auto my-2 rounded; }
 
+/* Checklist / task list (fiturwajibada C.57) */
+.ProseMirror li[data-checked] {
+  list-style: none;
+  position: relative;
+  padding-left: 26px;
+}
+.ProseMirror li[data-checked]::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 4px;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid #9ca3af;
+  border-radius: 3px;
+  background: #fff;
+  cursor: pointer;
+}
+.ProseMirror li[data-checked="true"]::before {
+  background: #2563eb;
+  border-color: #2563eb;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='white'%3E%3Cpath d='M6.5 11.5l-3.5-3.5 1-1 2.5 2.5 5.5-5.5 1 1z'/%3E%3C/svg%3E");
+  background-size: 12px;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+/* Tabel (fiturwajibada F) */
+.ProseMirror table {
+  @apply border-collapse my-2;
+  width: 100%;
+}
+.ProseMirror th, .ProseMirror td {
+  @apply border border-gray-300 px-2 py-1 align-top relative;
+  min-width: 40px;
+}
+.ProseMirror th {
+  @apply bg-gray-100 font-semibold;
+}
+.ProseMirror .column-resize-handle {
+  @apply absolute top-0 bottom-0 right-[-2px] w-1 bg-blue-400 cursor-col-resize;
+  pointer-events: none;
+}
+.ProseMirror .selectedCell::after {
+  content: "";
+  @apply absolute inset-0 pointer-events-none;
+  background: rgba(37, 99, 235, 0.12);
+}
+.ProseMirror .tableWrapper { overflow-x: auto; }
+
 /* Remote cursor styling (y-prosemirror) */
 .ProseMirror .y-cursor {
   @apply relative border-l-2;

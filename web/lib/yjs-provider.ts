@@ -1,13 +1,15 @@
 import * as Y from 'yjs'
 import * as awarenessProtocol from 'y-protocols/awareness'
-import { getAccessToken } from '@/lib/api-client'
+import { getAccessToken, refreshAccessToken, notifySessionExpired } from '@/lib/api-client'
 
 // Helper: encode a varUint (unsigned LEB128)
 function encodeVarUint(num: number): Uint8Array {
   const bytes: number[] = []
   while (num >= 128) {
-    bytes.push((num & 127) | 128)
-    num >>= 7
+    // Pakai aritmatika (bukan bitwise) — bitwise di JS terbatas 32-bit dan
+    // korup untuk panjang payload >= 2^31.
+    bytes.push((num % 128) | 128)
+    num = Math.floor(num / 128)
   }
   bytes.push(num)
   return new Uint8Array(bytes)
@@ -50,7 +52,13 @@ export enum ConnectionStatus {
   Reconnecting = 'reconnecting',
 }
 
+// Role dari server (MsgRole): owner/editor/viewer/view — dipakai client
+// untuk render editor read-only.
+export type WSRole = 'owner' | 'editor' | 'viewer' | 'view'
+
 type StatusCallback = (status: ConnectionStatus) => void
+type RoleCallback = (role: WSRole) => void
+type DocEventCallback = (payload: string) => void
 
 export class PulseWSProvider {
   private doc: Y.Doc
@@ -66,12 +74,36 @@ export class PulseWSProvider {
   private pingInterval: ReturnType<typeof setInterval> | null = null
   private _status: ConnectionStatus = ConnectionStatus.Disconnected
   private statusListeners: StatusCallback[] = []
+  private _role: WSRole | null = null
+  private roleListeners: RoleCallback[] = []
+  private docEventListeners: DocEventCallback[] = []
 
   constructor(doc: Y.Doc, wsUrl: string) {
     this.doc = doc
     this.url = wsUrl
     this._awareness = new awarenessProtocol.Awareness(doc)
     this._awareness.setLocalState(null)
+    // Forward setiap perubahan awareness lokal (cursor move, selection, nama)
+    // ke server. Tanpa listener ini, presence hanya terkirim sekali saat
+    // koneksi pertama dan cursor tidak pernah bergerak untuk user lain.
+    this._awareness.on('update', this._onAwarenessUpdate)
+    // FIX C1 (kritis): forward setiap update dokumen (keystroke/edit) ke
+    // server. Sebelumnya listener ini TIDAK ADA — edit lokal tidak pernah
+    // dikirim, sehingga real-time relay & persistence tidak pernah terpicu.
+    // Saat terhubung, update dikirim sebagai pesan Update (syncType 2).
+    // Saat offline, update disimpan di Y.Doc dan dikirim saat reconnect.
+    this.doc.on('update', this._onDocUpdate)
+  }
+
+  private _onDocUpdate = (update: Uint8Array, origin: unknown) => {
+    if (origin === this) return
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.send(buildSyncMessage(2, update))
+    } else {
+      // Update saat offline: tandai sebagai unsent. Saat reconnect,
+      // server minta state (fix C2) dan edit ini ikut terkirim.
+      this._hasUnsentChanges = true
+    }
   }
 
   get awareness() {
@@ -84,6 +116,26 @@ export class PulseWSProvider {
 
   get status() {
     return this._status
+  }
+
+  get role(): WSRole | null {
+    return this._role
+  }
+
+  onRole(cb: RoleCallback) {
+    this.roleListeners.push(cb)
+    return () => {
+      this.roleListeners = this.roleListeners.filter((l) => l !== cb)
+    }
+  }
+
+  // onDocEvent: event dokumen realtime dari server (komentar dll) —
+  // payload = string JSON, client menginterpretasi.
+  onDocEvent(cb: DocEventCallback) {
+    this.docEventListeners.push(cb)
+    return () => {
+      this.docEventListeners = this.docEventListeners.filter((l) => l !== cb)
+    }
   }
 
   onStatus(cb: StatusCallback) {
@@ -129,13 +181,28 @@ export class PulseWSProvider {
 
     this.ws.onmessage = (event) => {
       const data = new Uint8Array(event.data)
+      this._lastMessageAt = Date.now()
       const firstByte = data[0]
 
-      if (firstByte <= 2) {
+      if (firstByte === 0) {
+        // MsgSync — data = varUint(syncType) • varBuffer(payload)
         this._handleSyncMessage(data)
       } else if (firstByte === 1) {
+        // MsgAwareness — presence/cursor dari user lain.
         awarenessProtocol.applyAwarenessUpdate(this._awareness, data.slice(1), this)
+      } else if (firstByte === 5) {
+        // MsgRole — role user dari server (owner/editor/viewer/view).
+        const role = new TextDecoder().decode(data.slice(1)) as WSRole
+        if (this._role !== role) {
+          this._role = role
+          this.roleListeners.forEach((cb) => cb(role))
+        }
+      } else if (firstByte === 8) {
+        // MsgDocEvent — event dokumen realtime (komentar dll) dari server.
+        const payload = new TextDecoder().decode(data.slice(1))
+        this.docEventListeners.forEach((cb) => cb(payload))
       }
+      // Byte lain (ping/pong/auth) diabaikan.
     }
 
     this.ws.onclose = () => {
@@ -154,6 +221,18 @@ export class PulseWSProvider {
     }
   }
 
+  // Reconnect dengan refresh token jika diperlukan (awaited, bukan
+  // fire-and-forget — fix race: reconnect sebelumnya bisa jalan dengan
+  // token basi karena refresh belum selesai). Return true jika siap
+  // reconnect, false jika session mati (harus berhenti, jangan loop 401).
+  private async _refreshTokenIfNeeded(): Promise<boolean> {
+    if (this.reconnectAttempts > 0 && this.reconnectAttempts % 3 === 0) {
+      const token = await refreshAccessToken()
+      if (!token) return false
+    }
+    return true
+  }
+
   private _disconnect() {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
@@ -168,6 +247,21 @@ export class PulseWSProvider {
     this._updateStatus(ConnectionStatus.Disconnected)
   }
 
+  destroy() {
+    this.disconnect()
+    this._awareness.off('update', this._onAwarenessUpdate)
+    this.doc.off('update', this._onDocUpdate)
+    this.roleListeners = []
+    this.statusListeners = []
+    this.docEventListeners = []
+  }
+
+  private _onAwarenessUpdate = () => {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this._sendAwareness()
+    }
+  }
+
   private _scheduleReconnect() {
     if (!this.shouldConnect) return
     const delay = Math.min(
@@ -175,15 +269,34 @@ export class PulseWSProvider {
       this.maxReconnectDelay,
     )
     this.reconnectAttempts++
-    this.reconnectTimer = setTimeout(() => this._connect(), delay)
+    this.reconnectTimer = setTimeout(async () => {
+      const canReconnect = await this._refreshTokenIfNeeded()
+      if (!canReconnect) {
+        // Session mati (refresh gagal) — berhenti reconnect + trigger logout
+        // global (redirect ke /login) supaya tidak stuck di halaman.
+        this.shouldConnect = false
+        this._updateStatus(ConnectionStatus.Disconnected)
+        notifySessionExpired()
+        return
+      }
+      this._connect()
+    }, delay)
   }
 
   private _startPing() {
     this._stopPing()
-    this.pingInterval = setInterval(() => {
+    this._lastMessageAt = Date.now()
+    // Heartbeat detection (fix): server memutus koneksi setelah 90s diam.
+    // Client harus mendeteksi koneksi "zombie" (network drop tanpa close
+    // frame) — jika tidak ada pesan apa pun dari server dalam 75s, paksa
+    // reconnect.
+    this._heartbeatCheck = setInterval(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
         const ping = new Uint8Array([0x06])
         this.ws.send(ping)
+        if (Date.now() - this._lastMessageAt > 75000) {
+          this.ws.close()
+        }
       }
     }, 30000)
   }
@@ -193,7 +306,14 @@ export class PulseWSProvider {
       clearInterval(this.pingInterval)
       this.pingInterval = null
     }
+    if (this._heartbeatCheck) {
+      clearInterval(this._heartbeatCheck)
+      this._heartbeatCheck = null
+    }
   }
+
+  private _lastMessageAt = 0
+  private _heartbeatCheck: ReturnType<typeof setInterval> | null = null
 
   private _lastAwarenessSent = 0
   private _pendingAwareness: ReturnType<typeof setTimeout> | null = null
@@ -254,21 +374,35 @@ export class PulseWSProvider {
         {
           const update = Y.encodeStateAsUpdate(this.doc)
           this.send(buildSyncMessage(1, update))
+          // Dokumen baru (server tidak punya state) — setelah mengirim state
+          // penuh, dokumen ini sudah sinkron dengan server.
+          this._synced = true
         }
         break
       case 1: // SyncStep2 - full state from server
         {
-          Y.applyUpdate(this.doc, payload)
+          Y.applyUpdate(this.doc, payload, this)
           this._synced = true
+          // FIX C2: setelah menerima state server, jika kita punya edit
+          // lokal yang dibuat saat offline (belum terkirim), kirim state
+          // penuh kita ke server supaya tidak hilang. Server akan merge
+          // secara CRDT di sisi client saat relay.
+          if (this._hasUnsentChanges) {
+            const update = Y.encodeStateAsUpdate(this.doc)
+            this.send(buildSyncMessage(1, update))
+            this._hasUnsentChanges = false
+          }
         }
         break
       case 2: // Update - incremental update
         {
-          Y.applyUpdate(this.doc, payload)
+          Y.applyUpdate(this.doc, payload, this)
         }
         break
     }
   }
+
+  private _hasUnsentChanges = false
 
   private _updateStatus(status: ConnectionStatus) {
     this._status = status

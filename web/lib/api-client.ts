@@ -7,6 +7,26 @@ interface FetchOptions extends RequestInit {
 let accessToken: string | null = null
 let refreshPromise: Promise<string | null> | null = null
 
+// Global handler "session expired": didaftarkan oleh auth store. Dipanggil
+// ketika refresh token gagal (session sudah mati di server) — client harus
+// logout & redirect ke /login. Tanpa ini, halaman yang sudah login akan
+// terus polling/reconnect 401 selamanya (bug: sesi mati tapi client tidak tahu).
+let unauthorizedHandler: (() => void) | null = null
+
+export function setUnauthorizedHandler(cb: () => void) {
+  unauthorizedHandler = cb
+}
+
+function notifyUnauthorized() {
+  unauthorizedHandler?.()
+}
+
+// Export untuk dipanggil dari luar apiFetch (mis. WS provider saat refresh
+// gagal di tengah reconnect) — supaya session-expired selalu memicu logout.
+export function notifySessionExpired() {
+  notifyUnauthorized()
+}
+
 export function setAccessToken(token: string | null) {
   accessToken = token
 }
@@ -30,6 +50,8 @@ async function refreshAccessToken(): Promise<string | null> {
   }
 }
 
+export { refreshAccessToken }
+
 async function apiFetch(path: string, opts: FetchOptions = {}): Promise<Response> {
   const { skipAuth, ...init } = opts
   const headers: Record<string, string> = {
@@ -50,7 +72,11 @@ async function apiFetch(path: string, opts: FetchOptions = {}): Promise<Response
     credentials: 'include',
   })
 
-  if (res.status === 401 && !skipAuth && accessToken) {
+  // 401 → coba refresh dulu. Refresh dijalankan BAIK accessToken ada maupun
+  // tidak: setelah hard reload token in-memory kosong, tapi refresh cookie
+  // masih valid — tanpa ini session restore /getme gagal dan user di-bounce
+  // ke /login padahal masih login.
+  if (res.status === 401 && !skipAuth) {
     if (!refreshPromise) {
       refreshPromise = refreshAccessToken().finally(() => {
         refreshPromise = null
@@ -64,6 +90,10 @@ async function apiFetch(path: string, opts: FetchOptions = {}): Promise<Response
         headers,
         credentials: 'include',
       })
+    } else {
+      // Refresh gagal → session mati di server. Beri tahu global handler
+      // supaya logout + redirect (jangan diam-diam lanjut polling/reconnect).
+      notifyUnauthorized()
     }
   }
 
