@@ -157,21 +157,16 @@ func (w *Worker) batchInsertEvents(ctx context.Context, docID uuid.UUID, events 
 	if len(events) == 0 {
 		return nil
 	}
-	tx, err := w.pool.Begin(ctx)
+	
+	// Use COPY for better performance and atomicity
+	_, err := w.pool.CopyFrom(ctx, pgx.Identifier{"document_events"}, []string{"document_id", "update"},
+		pgx.CopyFromSlice(len(events), func(i int) ([]interface{}, error) {
+			return []interface{}{docID, events[i]}, nil
+		}))
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return fmt.Errorf("batch insert events: %w", err)
 	}
-	defer tx.Rollback(ctx)
-
-	for _, event := range events {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO document_events (document_id, update) VALUES ($1, $2)`,
-			docID, event,
-		); err != nil {
-			return fmt.Errorf("insert event: %w", err)
-		}
-	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 // handleSnapshot menyimpan snapshot bila aman:
