@@ -138,6 +138,18 @@ func (h *CollabHandlers) DeleteComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, CodeBadRequest, "invalid comment id")
 		return
 	}
+	
+	// Get comment first to include parentId in broadcast for proper cleanup
+	c, err := h.comRepo.GetComment(r.Context(), commentID)
+	if err != nil {
+		if errors.Is(err, comments.ErrNotFound) {
+			writeError(w, http.StatusNotFound, CodeNotFound, "comment not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, CodeInternal, "could not get comment")
+		return
+	}
+	
 	if err := h.comRepo.DeleteComment(r.Context(), commentID); err != nil {
 		if errors.Is(err, comments.ErrNotFound) {
 			writeError(w, http.StatusNotFound, CodeNotFound, "comment not found")
@@ -146,7 +158,8 @@ func (h *CollabHandlers) DeleteComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, CodeInternal, "could not delete comment")
 		return
 	}
-	DocEventBroadcast(docID, commentEvent("comment-deleted", &comments.Comment{ID: commentID, DocumentID: docID}))
+	// Broadcast with parentId so clients can clean up replies properly
+	DocEventBroadcast(docID, commentEvent("comment-deleted", c))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
