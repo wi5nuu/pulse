@@ -289,7 +289,7 @@ func (r *Repo) ListDocumentShares(ctx context.Context, documentID uuid.UUID) ([]
 	return shares, rows.Err()
 }
 
-// HasDocumentAccess checks if user has access to document (via workspace OR direct share)
+// HasDocumentAccess checks if user has access to document (via workspace OR direct share OR link share)
 func (r *Repo) HasDocumentAccess(ctx context.Context, documentID, userID uuid.UUID) (bool, string, error) {
 	// Check workspace membership first
 	var role string
@@ -318,14 +318,31 @@ func (r *Repo) HasDocumentAccess(ctx context.Context, documentID, userID uuid.UU
 		documentID, userID,
 	).Scan(&permission)
 	
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, "", nil
-		}
+	if err == nil {
+		return true, permission, nil
+	}
+	
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return false, "", fmt.Errorf("check document share: %w", err)
 	}
 	
-	return true, permission, nil
+	// Check link share (any active link share for this document)
+	var lsPermission string
+	err = r.pool.QueryRow(ctx, `
+		SELECT permission FROM document_link_shares
+		WHERE document_id = $1 AND (expires_at IS NULL OR expires_at > now())`,
+		documentID,
+	).Scan(&lsPermission)
+	
+	if err == nil {
+		return true, lsPermission, nil
+	}
+	
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, "", fmt.Errorf("check link share: %w", err)
+	}
+	
+	return false, "", nil
 }
 
 // --- scan helpers ---
