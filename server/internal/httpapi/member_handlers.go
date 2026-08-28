@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -125,6 +126,11 @@ func (h *MemberHandlers) InviteMember(w http.ResponseWriter, r *http.Request) {
 	}
 	var req inviteRequest
 	if !decodeValid(w, r, h.validate, &req) {
+		return
+	}
+	// Prevent self-invite
+	if strings.EqualFold(req.Email, userEmailFrom(r.Context())) {
+		writeError(w, http.StatusBadRequest, CodeBadRequest, "cannot invite yourself")
 		return
 	}
 	tokenBytes := make([]byte, 32)
