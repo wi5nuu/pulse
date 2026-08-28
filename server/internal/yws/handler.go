@@ -98,13 +98,15 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpapi.NewWSWriteError(w, http.StatusInternalServerError, "access check failed")
 		return
 	}
+	lsToken := r.URL.Query().Get("ls")
+	usedLinkShare := false
 	if !hasAccess {
-		lsToken := r.URL.Query().Get("ls")
 		if lsToken != "" && h.comRepo != nil {
 			ls, err := h.comRepo.GetByToken(r.Context(), lsToken)
 			if err == nil && ls.DocumentID == docID {
 				hasAccess = true
 				permission = ls.Permission
+				usedLinkShare = true
 			}
 		}
 	}
@@ -113,8 +115,19 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use permission as role (owner/editor/viewer or view/edit from share)
+	// Use permission as role (owner/editor/viewer or view/edit from share).
+	// For link shares, use the permission directly (view/edit).
+	// For document shares, use the permission (view/edit).
+	// For workspace members, use the role (owner/editor/viewer).
 	role := permission
+	if !usedLinkShare && permission != "view" && permission != "edit" {
+		// This is a workspace role (owner/editor/viewer), keep as-is
+		role = permission
+	}
+	// Validate link share permission: "view" should be read-only
+	if usedLinkShare && permission == "view" {
+		role = "view"
+	}
 
 	// 4. Upgrade ke WebSocket.
 	ws, err := h.upgrader.Upgrade(w, r, nil)
