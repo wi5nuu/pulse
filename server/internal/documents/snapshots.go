@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/pulse/server/internal/models"
@@ -50,15 +51,31 @@ func (r *SnapshotRepo) ListByDocument(ctx context.Context, docID uuid.UUID) ([]S
 
 // SaveSnapshot menyimpan snapshot baru.
 func (r *SnapshotRepo) SaveSnapshot(ctx context.Context, docID uuid.UUID, state []byte, eventCount int, createdBy *uuid.UUID) error {
-	_, err := r.pool.Exec(ctx, `
+	// Use Serializable to prevent concurrent version increment race.
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return fmt.Errorf("begin snapshot tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Get current max version under lock.
+	var maxVersion int
+	err = tx.QueryRow(ctx, `
+		SELECT COALESCE(MAX(version), 0) FROM document_snapshots WHERE document_id = $1`,
+		docID).Scan(&maxVersion)
+	if err != nil {
+		return fmt.Errorf("get max version: %w", err)
+	}
+
+	_, err = tx.Exec(ctx, `
 		INSERT INTO document_snapshots (document_id, state, version, event_count, created_by)
-		SELECT $1, $2, COALESCE(MAX(version), 0) + 1, $3, $4
-		FROM document_snapshots WHERE document_id = $1`,
-		docID, state, eventCount, createdBy)
+		VALUES ($1, $2, $3, $4, $5)`,
+		docID, state, maxVersion+1, eventCount, createdBy)
 	if err != nil {
 		return fmt.Errorf("save snapshot: %w", err)
 	}
-	return nil
+
+	return tx.Commit(ctx)
 }
 
 // GetByID mengambil snapshot berdasarkan ID.
