@@ -121,9 +121,14 @@ export default function CommentsPanel({ docId, view, userId, readOnly, provider,
   const submitReply = async (parentId: string) => {
     const body = (replyDrafts[parentId] ?? '').trim()
     if (!body) return
+    const parentComment = comments.find(c => c.id === parentId)
+    if (!parentComment) {
+      toast.error('Parent comment not found')
+      return
+    }
     try {
       await apiPost<{ comment: CommentItem }>(`/api/documents/${docId}/comments`, {
-        anchor: JSON.stringify({ from: 0, to: 0 }),
+        anchor: parentComment.anchor,
         body,
         parentId,
       })
