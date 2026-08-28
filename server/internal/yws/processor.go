@@ -202,14 +202,16 @@ func (p *SyncProcessor) handleSyncStep1(c *Connection, stateVector []byte) error
 //     lalu server kirim SYNC_STEP1, client balas SYNC_STEP2).
 //
 // Untuk relay: anggap SYNC_STEP2 = "state penuh dari client" → save sebagai
-// lastState, LALU broadcast ke client lain supaya mereka juga sync.
+// lastState, LALU broadcast ke client LAIN supaya mereka juga sync.
+// Exclude sender (c) to avoid echo.
 func (p *SyncProcessor) handleSyncStep2(c *Connection, update []byte) error {
 	// Save sebagai snapshot state (ini asumsi: client kirim full state saat
 	// reply SYNC_STEP1 dari server — benar menurut Yjs docs).
 	c.doc.SetState(update)
 
-	// Relay ke client lain: mereka mungkin sudah punya state parsial.
+	// Relay ke client LAIN: mereka mungkin sudah punya state parsial.
 	// Mereka akan apply & CRDT resolve duplikat. Aman.
+	// Exclude sender to avoid echo.
 	msg := buildSyncMessage(SyncStep2, update)
 	c.doc.Broadcast(msg, c)
 	return nil
