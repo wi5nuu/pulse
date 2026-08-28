@@ -290,7 +290,7 @@ function CommentThread({
           </div>
           <p className="text-sm text-gray-700 whitespace-pre-wrap">{r.body}</p>
           {!readOnly && r.authorId === userId && (
-            <button className="mt-1 text-[11px] text-red-500 hover:underline" onClick={onDelete}>Delete</button>
+            <button className="mt-1 text-[11px] text-red-500 hover:underline" onClick={() => onDeleteReply(r)}>Delete</button>
           )}
         </div>
       ))}
