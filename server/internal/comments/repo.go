@@ -174,7 +174,7 @@ func (r *Repo) CreateLinkShare(ctx context.Context, documentID uuid.UUID, permis
 		documentID).Scan(&existingID, &existingPerm)
 	if err == nil {
 		// Block permission downgrade: existing "edit" cannot be replaced with "view"
-		if existingPerm == "permission" && permission == "view" {
+		if existingPerm == "edit" && permission == "view" {
 			return nil, ErrLinkShareDowngrade
 		}
 		// Same permission = already exists
