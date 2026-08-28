@@ -292,7 +292,14 @@ func (h *BoardHandlers) UpdateColumn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if boardID, e := h.repo.BoardIDByColumn(r.Context(), colID); e == nil {
-		h.broadcastEvent(boardID, "column_updated", map[string]any{"id": colID, "title": req.Title, "position": req.Position})
+		updatedFields := map[string]any{"id": colID}
+		if req.Title != nil {
+			updatedFields["title"] = *req.Title
+		}
+		if req.Position != nil {
+			updatedFields["position"] = *req.Position
+		}
+		h.broadcastEvent(boardID, "column_updated", updatedFields)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -428,7 +435,20 @@ func (h *BoardHandlers) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if boardID, e := h.repo.BoardIDByTask(r.Context(), taskID); e == nil {
-		h.broadcastEvent(boardID, "task_updated", map[string]any{"id": taskID, "title": req.Title, "columnId": req.ColumnID, "position": req.Position})
+		updatedFields := map[string]any{"id": taskID}
+		if req.Title != nil {
+			updatedFields["title"] = *req.Title
+		}
+		if req.Description != nil {
+			updatedFields["description"] = *req.Description
+		}
+		if req.ColumnID != nil {
+			updatedFields["columnId"] = *req.ColumnID
+		}
+		if req.Position != nil {
+			updatedFields["position"] = *req.Position
+		}
+		h.broadcastEvent(boardID, "task_updated", updatedFields)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
