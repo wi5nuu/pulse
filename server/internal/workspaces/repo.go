@@ -10,15 +10,17 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/pulse/server/internal/models"
 )
 
-var ErrNotFound = errors.New("workspace not found")
-
-// ErrInviteAccepted dipakai AcceptInvite untuk invite yang sudah dipakai.
-var ErrInviteAccepted = errors.New("invite already accepted")
+var (
+	ErrNotFound       = errors.New("workspace not found")
+	ErrInviteAccepted = errors.New("invite already accepted")
+	ErrInviteExpired  = errors.New("invite expired")
+)
 
 type MemberWithUser struct {
 	WorkspaceID uuid.UUID
@@ -92,7 +94,7 @@ func (r *Repo) ListByUser(ctx context.Context, userID uuid.UUID) ([]*models.Work
 
 // Create workspace baru (beyond personal).
 func (r *Repo) Create(ctx context.Context, name string, ownerID uuid.UUID) (*models.Workspace, error) {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
@@ -106,7 +108,21 @@ func (r *Repo) Create(ctx context.Context, name string, ownerID uuid.UUID) (*mod
 		name, slug, ownerID)
 	ws := &models.Workspace{}
 	if err := row.Scan(&ws.ID, &ws.Name, &ws.Slug, &ws.CreatedBy, &ws.CreatedAt, &ws.UpdatedAt); err != nil {
-		return nil, fmt.Errorf("insert workspace: %w", err)
+		// Retry on unique_violation (slug race between concurrent creates).
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			slug = uniqueSlug(ctx, tx, slugify(name)+"-retry")
+			row = tx.QueryRow(ctx, `
+				INSERT INTO workspaces (name, slug, created_by)
+				VALUES ($1, $2, $3)
+				RETURNING id, name, slug, created_by, created_at, updated_at`,
+				name, slug, ownerID)
+			if err := row.Scan(&ws.ID, &ws.Name, &ws.Slug, &ws.CreatedBy, &ws.CreatedAt, &ws.UpdatedAt); err != nil {
+				return nil, fmt.Errorf("insert workspace (retry): %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("insert workspace: %w", err)
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO workspace_members (workspace_id, user_id, role)
@@ -308,10 +324,11 @@ func (r *Repo) AcceptInvite(ctx context.Context, token string, userID uuid.UUID)
 	var role string
 	var accepted bool
 	var inviteEmail string
+	var expiresAt time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT workspace_id, role, accepted, email FROM workspace_invites
-		WHERE token = $1 AND expires_at > now()
-		FOR UPDATE`, token).Scan(&wsID, &role, &accepted, &inviteEmail)
+		SELECT workspace_id, role, accepted, email, expires_at FROM workspace_invites
+		WHERE token = $1
+		FOR UPDATE`, token).Scan(&wsID, &role, &accepted, &inviteEmail, &expiresAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
@@ -320,6 +337,9 @@ func (r *Repo) AcceptInvite(ctx context.Context, token string, userID uuid.UUID)
 	}
 	if accepted {
 		return ErrInviteAccepted
+	}
+	if time.Now().UTC().After(expiresAt) {
+		return ErrInviteExpired
 	}
 
 	// Validate that the user's email matches the invite email
