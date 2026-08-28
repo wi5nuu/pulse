@@ -114,14 +114,14 @@ func NewRouter(d RouterDeps) http.Handler {
 			r.Get("/boards", NewBoardHandlers(d.BoardRepo, d.WsRepo).ListBoards)
 			r.Post("/boards", NewBoardHandlers(d.BoardRepo, d.WsRepo).CreateBoard)
 
-			// Members
-			memH := NewMemberHandlers(d.WsRepo)
-			r.Get("/members", memH.ListMembers)
-			r.Post("/invites", memH.InviteMember)
-			r.Get("/invites", memH.ListWorkspaceInvites)
-			r.Delete("/invites/{inviteID}", memH.DeleteInvite)
-			r.Patch("/members/{userID}", memH.UpdateMemberRole)
-			r.Delete("/members/{userID}", memH.RemoveMember)
+// Members
+		memH := NewMemberHandlers(d.WsRepo)
+		r.Get("/members", memH.ListMembers)
+		r.With(RateLimit(5, 10)).Post("/invites", memH.InviteMember)
+		r.Get("/invites", memH.ListWorkspaceInvites)
+		r.Delete("/invites/{inviteID}", memH.DeleteInvite)
+		r.Patch("/members/{userID}", memH.UpdateMemberRole)
+		r.Delete("/members/{userID}", memH.RemoveMember)
 		})
 
 		// Documents (by ID)
@@ -172,18 +172,20 @@ func NewRouter(d RouterDeps) http.Handler {
 		})
 	})
 
-	// Invite detail (public — cukup token).
+	// Invite detail (public — cukup token). Rate-limited: endpoint publik
+	// tanpa auth, token 64-hex → brute-force lambat, tapi tetap batasi.
 	memH := NewMemberHandlers(d.WsRepo)
-	r.Get("/invites/{token}", memH.GetInvite)
-	// Link share resolve (public — "Anyone with the link").
+	r.With(RateLimit(5, 20)).Get("/invites/{token}", memH.GetInvite)
+	// Link share resolve (public — "Anyone with the link"). Rate-limited keras
+	// (mitigasi token brute-force & DoS pada endpoint tanpa auth).
 	collabPub := NewCollabHandlers(d.CommentRepo, d.DocsRepo)
-	r.Get("/api/linkshare/{token}", collabPub.GetLinkSharePublic)
+	r.With(RateLimit(5, 20)).Get("/api/linkshare/{token}", collabPub.GetLinkSharePublic)
 	// Invite accept (butuh auth).
-	r.With(RequireAuth(d.Jwt)).Post("/invites/{token}/accept", memH.AcceptInvite)
+	r.With(RequireAuth(d.Jwt), RateLimit(10, 20)).Post("/invites/{token}/accept", memH.AcceptInvite)
 	// Invite reject (butuh auth).
-	r.With(RequireAuth(d.Jwt)).Post("/invites/{token}/reject", memH.RejectInvite)
+	r.With(RequireAuth(d.Jwt), RateLimit(10, 20)).Post("/invites/{token}/reject", memH.RejectInvite)
 	// List pending invites untuk user yang login.
-	r.With(RequireAuth(d.Jwt)).Get("/invites/pending", memH.ListPendingInvites)
+	r.With(RequireAuth(d.Jwt), RateLimit(10, 30)).Get("/invites/pending", memH.ListPendingInvites)
 
 	// WebSocket endpoints.
 	if d.WSHandler != nil {
