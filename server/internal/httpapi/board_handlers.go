@@ -312,6 +312,15 @@ func (h *BoardHandlers) DeleteColumn(w http.ResponseWriter, r *http.Request) {
 	if !h.requireEditor(w, r, wsID) {
 		return
 	}
+	// Ambil board + daftar task SEBELUM delete, supaya client lain bisa
+	// membersihkan task yang ikut terhapus via ON DELETE CASCADE.
+	boardID, boardErr := h.repo.BoardIDByColumn(r.Context(), colID)
+	var staleTasks []*boards.Task
+	if boardErr == nil {
+		if tasks, e := h.repo.ListTasksByColumn(r.Context(), colID); e == nil {
+			staleTasks = tasks
+		}
+	}
 	if err := h.repo.DeleteColumn(r.Context(), colID); err != nil {
 		if errors.Is(err, boards.ErrNotFound) {
 			writeError(w, http.StatusNotFound, CodeNotFound, "column not found")
@@ -320,8 +329,12 @@ func (h *BoardHandlers) DeleteColumn(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, CodeInternal, "could not delete column")
 		return
 	}
-	// Broadcast supaya client lain menghapus kolom real-time.
-	if boardID, e := h.repo.BoardIDByColumn(r.Context(), colID); e == nil {
+	if boardErr == nil {
+		// Broadcast task deletions dulu, baru column deletion — urutan penting
+		// agar client tidak render task orphan saat menghapus kolom.
+		for _, t := range staleTasks {
+			h.broadcastEvent(boardID, "task_deleted", map[string]any{"id": t.ID})
+		}
 		h.broadcastEvent(boardID, "column_deleted", map[string]any{"id": colID})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
