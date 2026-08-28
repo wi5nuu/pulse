@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/pulse/server/internal/auth"
 	"github.com/pulse/server/internal/models"
@@ -106,6 +107,14 @@ func (h *AuthHandlers) Register(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.usersRepo.Create(r.Context(), req.Email, req.Name, hash)
 	if err != nil {
+		// Handle TOCTOU race: EmailTaken returned false but another request
+		// created the user between our check and Create. Handle unique
+		// constraint violation gracefully.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			writeError(w, http.StatusConflict, CodeConflict, "email already registered")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, CodeInternal, "could not create user")
 		return
 	}
