@@ -38,3 +38,11 @@ web/yarn-error.log*
 
 # --- Docker local data (kalau ada yang ter-volume keluar) ---
 data/
+
+# --- Build output & local artifacts ---
+bin/
+*.log
+*.bak
+server/smoke.log
+server/smoke.err.log
+server/.env.bak
