@@ -286,7 +286,7 @@ func (r *Repo) CreateTask(ctx context.Context, columnID uuid.UUID, title string,
 	return scanTask(row)
 }
 
-func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, title string, description *string, columnID *uuid.UUID, position *float64, version int) error {
+func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, title *string, description *string, columnID *uuid.UUID, position *float64, version int) error {
 	ct, err := r.pool.Exec(ctx, `
 		UPDATE tasks SET
 			title = COALESCE($2, title),
@@ -295,7 +295,7 @@ func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, title string, descr
 			position = COALESCE($5, position),
 			version = version + 1
 		WHERE id = $1 AND version = $6`,
-		id, nullableStr(title), description, columnID, position, version,
+		id, title, description, columnID, position, version,
 	)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
@@ -306,11 +306,11 @@ func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, title string, descr
 	return nil
 }
 
-func nullableStr(s string) *string {
-	if s == "" {
+func nullableStr(s *string) *string {
+	if s == nil || *s == "" {
 		return nil
 	}
-	return &s
+	return s
 }
 
 func (r *Repo) DeleteTask(ctx context.Context, id uuid.UUID) error {
