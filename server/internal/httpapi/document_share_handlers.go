@@ -82,6 +82,8 @@ func (h *DocumentShareHandlers) ShareDocument(w http.ResponseWriter, r *http.Req
 	}
 
 	// Share document
+
+	// Share document
 	if err := h.docRepo.ShareDocument(r.Context(), docID, sharedWithID, uid, req.Permission); err != nil {
 		writeError(w, http.StatusInternalServerError, CodeInternal, "could not share document")
 		return
@@ -123,7 +125,7 @@ func (h *DocumentShareHandlers) UnshareDocument(w http.ResponseWriter, r *http.R
 
 	// Check if user is owner or has edit permission
 	role, err := h.wsRepo.GetMemberRole(r.Context(), doc.WorkspaceID, uid)
-	if err != nil || (role != "owner" && role != "editor") {
+	if err != nil || (role != models.RoleOwner && role != models.RoleEditor) {
 		writeError(w, http.StatusForbidden, CodeForbidden, "only workspace owners/editors can unshare documents")
 		return
 	}
