@@ -164,8 +164,13 @@ func (h *MemberHandlers) GetInvite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, CodeInternal, "could not get invite")
 		return
 	}
+	// Check expiry explicitly for clearer error message.
 	if invite.ExpiresAt.Before(time.Now()) {
-		writeError(w, http.StatusNotFound, CodeNotFound, "invite expired")
+		writeError(w, http.StatusGone, CodeNotFound, "invite expired")
+		return
+	}
+	if invite.Accepted {
+		writeError(w, http.StatusConflict, CodeConflict, "invite already accepted")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -195,11 +200,15 @@ func (h *MemberHandlers) AcceptInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.wsRepo.AcceptInvite(r.Context(), token, uid); err != nil {
 		if errors.Is(err, workspaces.ErrNotFound) {
-			writeError(w, http.StatusNotFound, CodeNotFound, "invite not found or expired")
+			writeError(w, http.StatusNotFound, CodeNotFound, "invite not found")
 			return
 		}
 		if errors.Is(err, workspaces.ErrInviteAccepted) {
 			writeError(w, http.StatusConflict, CodeConflict, "invite already accepted")
+			return
+		}
+		if errors.Is(err, workspaces.ErrInviteExpired) {
+			writeError(w, http.StatusGone, CodeNotFound, "invite expired")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, CodeInternal, "could not accept invite")
@@ -250,7 +259,17 @@ func (h *MemberHandlers) UpdateMemberRole(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// Hanya owner yang bisa mengubah role member (FEATURES.md §6).
+	ownerID, ok := userIDFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, CodeUnauthorized, "no user")
+		return
+	}
 	if !h.requireOwner(w, r, wsID) {
+		return
+	}
+	// Self-demotion guard: owner tidak boleh menurunkan role sendiri.
+	if userID == ownerID {
+		writeError(w, http.StatusBadRequest, CodeBadRequest, "cannot change your own role")
 		return
 	}
 	var req updateRoleRequest
@@ -281,7 +300,17 @@ func (h *MemberHandlers) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Hanya owner yang bisa menghapus member (FEATURES.md §6).
+	ownerID, ok := userIDFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, CodeUnauthorized, "no user")
+		return
+	}
 	if !h.requireOwner(w, r, wsID) {
+		return
+	}
+	// Self-removal guard: owner tidak boleh menghapus diri sendiri.
+	if userID == ownerID {
+		writeError(w, http.StatusBadRequest, CodeBadRequest, "owner cannot remove themselves")
 		return
 	}
 	if err := h.wsRepo.RemoveMember(r.Context(), wsID, userID); err != nil {
