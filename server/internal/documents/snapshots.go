@@ -121,7 +121,7 @@ func (r *SnapshotRepo) PruneEventsBeforeSnapshot(ctx context.Context, docID uuid
 	_, err := r.pool.Exec(ctx, `
 		DELETE FROM document_events e
 		WHERE e.document_id = $1
-		  AND e.created_at <= COALESCE((
+		  AND e.created_at < COALESCE((
 		      SELECT created_at FROM document_snapshots
 		      WHERE document_id = $1
 		      ORDER BY version DESC LIMIT 1
