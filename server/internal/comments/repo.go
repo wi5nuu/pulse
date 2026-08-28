@@ -15,9 +15,10 @@ import (
 )
 
 var (
-	ErrNotFound      = errors.New("comment/link share not found")
-	ErrExpired       = errors.New("link share expired")
-	ErrAlreadyExists = errors.New("comment already in that state")
+	ErrNotFound          = errors.New("comment/link share not found")
+	ErrExpired           = errors.New("link share expired")
+	ErrAlreadyExists     = errors.New("comment already in that state")
+	ErrLinkShareDowngrade = errors.New("cannot downgrade link share permission")
 )
 
 type Repo struct {
@@ -166,14 +167,24 @@ type LinkShare struct {
 // permission yang sama — client bisa pakai yang lama.
 func (r *Repo) CreateLinkShare(ctx context.Context, documentID uuid.UUID, permission string, createdBy uuid.UUID, expiresAt *time.Time) (*LinkShare, error) {
 	var existingID uuid.UUID
+	var existingPerm string
 	err := r.pool.QueryRow(ctx, `
-		SELECT id FROM document_link_shares
-		WHERE document_id = $1 AND permission = $2 AND (expires_at IS NULL OR expires_at > now())`,
-		documentID, permission).Scan(&existingID)
+		SELECT id, permission FROM document_link_shares
+		WHERE document_id = $1 AND (expires_at IS NULL OR expires_at > now())`,
+		documentID).Scan(&existingID, &existingPerm)
 	if err == nil {
-		return nil, ErrAlreadyExists
+		// Block permission downgrade: existing "edit" cannot be replaced with "view"
+		if existingPerm == "permission" && permission == "view" {
+			return nil, ErrLinkShareDowngrade
+		}
+		// Same permission = already exists
+		if existingPerm == permission {
+			return nil, ErrAlreadyExists
+		}
+		// Permission upgrade: delete old and create new
+		_, _ = r.pool.Exec(ctx, `DELETE FROM document_link_shares WHERE id = $1`, existingID)
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("check existing link share: %w", err)
 	}
 
