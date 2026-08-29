@@ -306,13 +306,6 @@ func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, title *string, desc
 	return nil
 }
 
-func nullableStr(s *string) *string {
-	if s == nil || *s == "" {
-		return nil
-	}
-	return s
-}
-
 func (r *Repo) DeleteTask(ctx context.Context, id uuid.UUID) error {
 	ct, err := r.pool.Exec(ctx, `DELETE FROM tasks WHERE id = $1`, id)
 	if err != nil {
