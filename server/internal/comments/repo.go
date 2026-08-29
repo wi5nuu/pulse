@@ -200,12 +200,12 @@ func (r *Repo) CreateLinkShare(ctx context.Context, documentID uuid.UUID, permis
 	return s, nil
 }
 
-// ListLinkShares mengambil semua link share dokumen.
+// ListLinkShares mengambil semua link share dokumen (hanya yang aktif/belum expired).
 func (r *Repo) ListLinkShares(ctx context.Context, documentID uuid.UUID) ([]*LinkShare, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, document_id, token, permission, created_by, expires_at, created_at
 		FROM document_link_shares
-		WHERE document_id = $1
+		WHERE document_id = $1 AND (expires_at IS NULL OR expires_at > now())
 		ORDER BY created_at DESC`, documentID)
 	if err != nil {
 		return nil, fmt.Errorf("list link shares: %w", err)
