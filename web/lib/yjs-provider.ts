@@ -249,6 +249,10 @@ export class PulseWSProvider {
 
   destroy() {
     this.disconnect()
+    if (this._pendingAwareness) {
+      clearTimeout(this._pendingAwareness)
+      this._pendingAwareness = null
+    }
     this._awareness.off('update', this._onAwarenessUpdate)
     this.doc.off('update', this._onDocUpdate)
     this.roleListeners = []
