@@ -2,6 +2,7 @@ package documents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -87,6 +88,9 @@ func (r *SnapshotRepo) GetByID(ctx context.Context, snapshotID int64) (*models.D
 	s := &models.DocumentSnapshot{}
 	err := row.Scan(&s.ID, &s.DocumentID, &s.State, &s.Version, &s.EventCount, &s.CreatedBy, &s.CreatedAt)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("get snapshot by id: %w", err)
 	}
 	return s, nil
@@ -103,6 +107,9 @@ func (r *SnapshotRepo) GetLatestSnapshot(ctx context.Context, docID uuid.UUID) (
 	s := &models.DocumentSnapshot{}
 	err := row.Scan(&s.ID, &s.DocumentID, &s.State, &s.Version, &s.EventCount, &s.CreatedBy, &s.CreatedAt)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("get latest snapshot: %w", err)
 	}
 	return s, nil
