@@ -104,6 +104,8 @@ func (h *SnapshotHandlers) RestoreSnapshot(w http.ResponseWriter, r *http.Reques
 	restoreUserID := &userID
 	if err := h.snapshotRepo.SaveSnapshot(r.Context(), docID, snapshot.State, snapshot.EventCount, restoreUserID); err != nil {
 		slog.Error("failed to save restore snapshot marker", "error", err)
+		writeError(w, http.StatusInternalServerError, CodeInternal, "could not save restore snapshot")
+		return
 	}
 
 	DocStateBroadcast(docID, snapshot.State)
