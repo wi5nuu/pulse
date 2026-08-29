@@ -214,7 +214,8 @@ func (h *CollabHandlers) ListLinkShares(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *CollabHandlers) DeleteLinkShare(w http.ResponseWriter, r *http.Request) {
-	if _, _, ok := parseDocAndAuthorizeUser(w, r, h.docRepo, true); !ok {
+	docID, _, ok := parseDocAndAuthorizeUser(w, r, h.docRepo, true)
+	if !ok {
 		return
 	}
 	shareID, err := uuid.Parse(chi.URLParam(r, "shareID"))
@@ -222,7 +223,7 @@ func (h *CollabHandlers) DeleteLinkShare(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, CodeBadRequest, "invalid share id")
 		return
 	}
-	if err := h.comRepo.DeleteLinkShare(r.Context(), shareID); err != nil {
+	if err := h.comRepo.DeleteLinkShare(r.Context(), shareID, docID); err != nil {
 		if errors.Is(err, comments.ErrNotFound) {
 			writeError(w, http.StatusNotFound, CodeNotFound, "link share not found")
 			return

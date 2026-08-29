@@ -242,9 +242,9 @@ func (r *Repo) GetByToken(ctx context.Context, token string) (*LinkShare, error)
 	return s, nil
 }
 
-// DeleteLinkShare menghapus link share.
-func (r *Repo) DeleteLinkShare(ctx context.Context, shareID uuid.UUID) error {
-	ct, err := r.pool.Exec(ctx, `DELETE FROM document_link_shares WHERE id = $1`, shareID)
+// DeleteLinkShare menghapus link share (hanya jika milik dokumen yang diminta).
+func (r *Repo) DeleteLinkShare(ctx context.Context, shareID, documentID uuid.UUID) error {
+	ct, err := r.pool.Exec(ctx, `DELETE FROM document_link_shares WHERE id = $1 AND document_id = $2`, shareID, documentID)
 	if err != nil {
 		return fmt.Errorf("delete link share: %w", err)
 	}
