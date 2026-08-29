@@ -28,7 +28,14 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     )
   }
 
-  if (!user) return null
+  if (!user) {
+    // Show loading while redirecting instead of blank frame
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="skeleton h-8 w-32" />
+      </div>
+    )
+  }
 
   return <>{children}</>
 }
