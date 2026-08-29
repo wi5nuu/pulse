@@ -217,6 +217,10 @@ func (h *MemberHandlers) AcceptInvite(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusGone, CodeNotFound, "invite expired")
 			return
 		}
+		if errors.Is(err, workspaces.ErrInviteEmailMismatch) {
+			writeError(w, http.StatusForbidden, CodeForbidden, "this invitation is for a different email")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, CodeInternal, "could not accept invite")
 		return
 	}
@@ -349,6 +353,10 @@ func (h *MemberHandlers) RejectInvite(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, workspaces.ErrInviteAccepted) {
 			writeError(w, http.StatusConflict, CodeConflict, "invite already accepted")
+			return
+		}
+		if errors.Is(err, workspaces.ErrInviteEmailMismatch) {
+			writeError(w, http.StatusForbidden, CodeForbidden, "this invitation is for a different email")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, CodeInternal, "could not reject invite")
