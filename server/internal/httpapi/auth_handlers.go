@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -121,8 +122,8 @@ func (h *AuthHandlers) Register(w http.ResponseWriter, r *http.Request) {
 
 	// Auto-create workspace personal supaya onboarding langsung bisa mulai bikin dokumen.
 	if _, werr := h.wsRepo.CreatePersonalWorkspace(r.Context(), user.ID, req.Name+"'s Workspace"); werr != nil {
-		// Tidak fatal: user tetap terdaftar. Di produksi: log warning.
-		_ = werr
+		// Tidak fatal: user tetap terdaftar. Log warning supaya bisa didiagnosa.
+		slog.Warn("failed to create personal workspace", "user", user.ID, "error", werr)
 	}
 
 	h.issueTokens(w, r, user, http.StatusCreated)
