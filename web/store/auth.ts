@@ -17,7 +17,10 @@ interface AuthState {
 
 // Dedup: beberapa caller (AuthGuard + halaman) bisa memanggil restoreSession
 // bersamaan — jalankan sekali saja, yang lain menunggu promise yang sama.
+// Restore version: monotonically incrementing ID supaya request lama (stale)
+// tidak bisa overwrite state setelah clear() atau restoreSession baru.
 let pendingRestore: Promise<void> | null = null
+let restoreVersion = 0
 
 export const useAuthStore = create<AuthState>((set) => ({
   user: null,
@@ -28,21 +31,30 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
   restoreSession: () => {
     if (pendingRestore) return pendingRestore
+    const version = ++restoreVersion
     pendingRestore = (async () => {
       try {
         const data = await getMe()
+        // Stale: clear() or another restoreSession() was called while we were
+        // fetching. Do not overwrite the newer state.
+        if (version !== restoreVersion) return
         set({ user: data, loading: false })
       } catch {
+        if (version !== restoreVersion) return
         set({ user: null, loading: false })
       } finally {
-        pendingRestore = null
+        if (version === restoreVersion) {
+          pendingRestore = null
+        }
       }
     })()
     return pendingRestore
   },
   clear: () => {
     setAccessToken(null)
-    set({ user: null })
+    pendingRestore = null
+    restoreVersion++
+    set({ user: null, loading: false })
   },
 }))
 
