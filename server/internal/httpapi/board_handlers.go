@@ -190,10 +190,14 @@ func (h *BoardHandlers) GetBoard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, CodeBadRequest, "invalid board id")
 		return
 	}
-	// Authz: hanya member workspace board yang boleh baca.
+	// Authz: cek apakah board ada dulu, lalu cek keanggotaan workspace.
 	wsID, err := h.repo.BoardWorkspaceID(r.Context(), boardID)
 	if err != nil {
-		writeError(w, http.StatusForbidden, CodeForbidden, "not a workspace member")
+		if errors.Is(err, boards.ErrNotFound) {
+			writeError(w, http.StatusNotFound, CodeNotFound, "board not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, CodeInternal, "could not load board")
 		return
 	}
 	if !h.requireMember(w, r, wsID) {
@@ -231,7 +235,11 @@ func (h *BoardHandlers) CreateColumn(w http.ResponseWriter, r *http.Request) {
 	}
 	wsID, err := h.repo.BoardWorkspaceID(r.Context(), boardID)
 	if err != nil {
-		writeError(w, http.StatusForbidden, CodeForbidden, "not a workspace member")
+		if errors.Is(err, boards.ErrNotFound) {
+			writeError(w, http.StatusNotFound, CodeNotFound, "board not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, CodeInternal, "could not load board")
 		return
 	}
 	if !h.requireEditor(w, r, wsID) {
@@ -273,7 +281,11 @@ func (h *BoardHandlers) UpdateColumn(w http.ResponseWriter, r *http.Request) {
 	}
 	wsID, err := h.repo.ColumnWorkspaceID(r.Context(), colID)
 	if err != nil {
-		writeError(w, http.StatusForbidden, CodeForbidden, "not a workspace member")
+		if errors.Is(err, boards.ErrNotFound) {
+			writeError(w, http.StatusNotFound, CodeNotFound, "column not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, CodeInternal, "could not load column")
 		return
 	}
 	if !h.requireEditor(w, r, wsID) {
@@ -313,7 +325,11 @@ func (h *BoardHandlers) DeleteColumn(w http.ResponseWriter, r *http.Request) {
 	}
 	wsID, err := h.repo.ColumnWorkspaceID(r.Context(), colID)
 	if err != nil {
-		writeError(w, http.StatusForbidden, CodeForbidden, "not a workspace member")
+		if errors.Is(err, boards.ErrNotFound) {
+			writeError(w, http.StatusNotFound, CodeNotFound, "column not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, CodeInternal, "could not load column")
 		return
 	}
 	if !h.requireEditor(w, r, wsID) {
@@ -361,7 +377,11 @@ func (h *BoardHandlers) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	wsID, err := h.repo.ColumnWorkspaceID(r.Context(), colID)
 	if err != nil {
-		writeError(w, http.StatusForbidden, CodeForbidden, "not a workspace member")
+		if errors.Is(err, boards.ErrNotFound) {
+			writeError(w, http.StatusNotFound, CodeNotFound, "column not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, CodeInternal, "could not load column")
 		return
 	}
 	if !h.requireEditor(w, r, wsID) {
@@ -411,7 +431,11 @@ func (h *BoardHandlers) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	wsID, err := h.repo.TaskWorkspaceID(r.Context(), taskID)
 	if err != nil {
-		writeError(w, http.StatusForbidden, CodeForbidden, "not a workspace member")
+		if errors.Is(err, boards.ErrNotFound) {
+			writeError(w, http.StatusNotFound, CodeNotFound, "task not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, CodeInternal, "could not load task")
 		return
 	}
 	if !h.requireEditor(w, r, wsID) {
@@ -462,7 +486,11 @@ func (h *BoardHandlers) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	}
 	wsID, err := h.repo.TaskWorkspaceID(r.Context(), taskID)
 	if err != nil {
-		writeError(w, http.StatusForbidden, CodeForbidden, "not a workspace member")
+		if errors.Is(err, boards.ErrNotFound) {
+			writeError(w, http.StatusNotFound, CodeNotFound, "task not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, CodeInternal, "could not load task")
 		return
 	}
 	if !h.requireEditor(w, r, wsID) {
