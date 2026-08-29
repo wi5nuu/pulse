@@ -43,6 +43,7 @@ async function refreshAccessToken(): Promise<string | null> {
     })
     if (!res.ok) return null
     const data = await res.json()
+    if (!data.accessToken || typeof data.accessToken !== 'string') return null
     accessToken = data.accessToken
     return data.accessToken
   } catch {
