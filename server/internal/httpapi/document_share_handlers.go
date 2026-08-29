@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-playground/validator/v10"
@@ -85,6 +86,11 @@ func (h *DocumentShareHandlers) ShareDocument(w http.ResponseWriter, r *http.Req
 
 	// Share document
 	if err := h.docRepo.ShareDocument(r.Context(), docID, sharedWithID, uid, req.Permission); err != nil {
+		// Check for FK violation (target user doesn't exist)
+		if strings.Contains(err.Error(), "foreign key") || strings.Contains(err.Error(), "violates foreign key") {
+			writeError(w, http.StatusNotFound, CodeNotFound, "user not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, CodeInternal, "could not share document")
 		return
 	}
