@@ -20,6 +20,7 @@ var (
 	ErrNotFound       = errors.New("workspace not found")
 	ErrInviteAccepted = errors.New("invite already accepted")
 	ErrInviteExpired  = errors.New("invite expired")
+	ErrInviteEmailMismatch = errors.New("invite email mismatch")
 )
 
 type MemberWithUser struct {
@@ -355,7 +356,7 @@ func (r *Repo) AcceptInvite(ctx context.Context, token string, userID uuid.UUID)
 	// Case-insensitive email comparison (both columns are CITEXT in database)
 	// Using strings.EqualFold as additional safety for case-insensitive comparison
 	if !strings.EqualFold(userEmail, inviteEmail) {
-		return fmt.Errorf("this invitation is for %s, but you are logged in as %s", inviteEmail, userEmail)
+		return ErrInviteEmailMismatch
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -405,7 +406,7 @@ func (r *Repo) RejectInvite(ctx context.Context, token string, userID uuid.UUID)
 	// Case-insensitive email comparison (both columns are CITEXT in database)
 	// Using strings.EqualFold as additional safety for case-insensitive comparison
 	if !strings.EqualFold(userEmail, inviteEmail) {
-		return fmt.Errorf("this invitation is for %s, but you are logged in as %s", inviteEmail, userEmail)
+		return ErrInviteEmailMismatch
 	}
 
 	// Hapus invite (reject = delete)
