@@ -142,14 +142,20 @@ func (r *SnapshotRepo) LoadEventsSince(ctx context.Context, docID uuid.UUID, sin
 // tabel events tidak boleh tumbuh tanpa batas — snapshot sudah menangkap
 // semua state, event lama tidak perlu lagi).
 func (r *SnapshotRepo) PruneEventsBeforeSnapshot(ctx context.Context, docID uuid.UUID) error {
+	// Batch delete: limit to 1000 rows per statement to avoid long-running
+	// locks on large tables. Caller can re-invoke if more pruning is needed.
 	_, err := r.pool.Exec(ctx, `
 		DELETE FROM document_events e
-		WHERE e.document_id = $1
-		  AND e.created_at < COALESCE((
-		      SELECT created_at FROM document_snapshots
-		      WHERE document_id = $1
-		      ORDER BY version DESC LIMIT 1
-		  ), '-infinity'::timestamptz)`,
+		WHERE e.id IN (
+			SELECT e2.id FROM document_events e2
+			WHERE e2.document_id = $1
+			  AND e2.created_at < COALESCE((
+			      SELECT created_at FROM document_snapshots
+			      WHERE document_id = $1
+			      ORDER BY version DESC LIMIT 1
+			  ), '-infinity'::timestamptz)
+			LIMIT 1000
+		)`,
 		docID)
 	if err != nil {
 		return fmt.Errorf("prune events: %w", err)
