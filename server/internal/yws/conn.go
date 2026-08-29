@@ -19,7 +19,7 @@ type Connection struct {
 	send     chan []byte // buffered; write pump konsumsi
 	done     chan struct{} // ditutup saat Close(); sinyal shutdown write pump
 	closed   bool
-	closeMu  sync.Mutex
+	closeMu  sync.RWMutex
 	closeOnce sync.Once
 
 	// Identitas pengguna untuk presence/awareness & authorization (Fase 7).
@@ -150,8 +150,8 @@ func (c *Connection) Close() {
 
 // IsClosed dipakai oleh Hub untuk skip cleanup double.
 func (c *Connection) IsClosed() bool {
-	c.closeMu.Lock()
-	defer c.closeMu.Unlock()
+	c.closeMu.RLock()
+	defer c.closeMu.RUnlock()
 	return c.closed
 }
 
