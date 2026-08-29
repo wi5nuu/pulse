@@ -90,6 +90,10 @@ async function apiFetch(path: string, opts: FetchOptions = {}): Promise<Response
         headers,
         credentials: 'include',
       })
+      // Second 401 after successful refresh → session invalid. Trigger logout.
+      if (res.status === 401) {
+        notifyUnauthorized()
+      }
     } else {
       // Refresh gagal → session mati di server. Beri tahu global handler
       // supaya logout + redirect (jangan diam-diam lanjut polling/reconnect).
