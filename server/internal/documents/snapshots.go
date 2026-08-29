@@ -52,17 +52,18 @@ func (r *SnapshotRepo) ListByDocument(ctx context.Context, docID uuid.UUID) ([]S
 
 // SaveSnapshot menyimpan snapshot baru.
 func (r *SnapshotRepo) SaveSnapshot(ctx context.Context, docID uuid.UUID, state []byte, eventCount int, createdBy *uuid.UUID) error {
-	// Use Serializable to prevent concurrent version increment race.
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	// Use REPEATABLE READ + SELECT FOR UPDATE to avoid serialization failures
+	// under concurrent snapshot saves for different documents.
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return fmt.Errorf("begin snapshot tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// Get current max version under lock.
+	// Get current max version under lock (FOR UPDATE prevents concurrent increments).
 	var maxVersion int
 	err = tx.QueryRow(ctx, `
-		SELECT COALESCE(MAX(version), 0) FROM document_snapshots WHERE document_id = $1`,
+		SELECT COALESCE(MAX(version), 0) FROM document_snapshots WHERE document_id = $1 FOR UPDATE`,
 		docID).Scan(&maxVersion)
 	if err != nil {
 		return fmt.Errorf("get max version: %w", err)
