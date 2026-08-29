@@ -378,16 +378,19 @@ func (d *Document) Broadcast(data []byte, except *Connection) {
 // Jika callback return false, iterasi berhenti.
 func (s *Store) ForEachDirty(ctx context.Context, fn func(ctx context.Context, docID uuid.UUID, doc *Document) bool) {
 	s.mu.RLock()
-	ids := make([]uuid.UUID, 0, len(s.docs))
+	type docEntry struct {
+		id   uuid.UUID
+		doc  *Document
+	}
+	entries := make([]docEntry, 0, len(s.docs))
 	for id, doc := range s.docs {
 		if doc.PendingEventCount() > 0 || doc.NeedsWriteBack() || doc.SnapshotDue() {
-			ids = append(ids, id)
+			entries = append(entries, docEntry{id: id, doc: doc})
 		}
 	}
 	s.mu.RUnlock()
-	for _, id := range ids {
-		doc := s.GetOrCreate(id)
-		if !fn(ctx, id, doc) {
+	for _, e := range entries {
+		if !fn(ctx, e.id, e.doc) {
 			return
 		}
 	}
