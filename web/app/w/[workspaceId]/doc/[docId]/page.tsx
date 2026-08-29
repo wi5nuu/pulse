@@ -109,11 +109,29 @@ export default function DocEditorPage() {
     const toggleLinkCommand = () => {
       const view = viewRef.current
       if (!view) return false
+      const mark = view.state.schema.marks.link
+      if (!mark) return false
       const current = view.state.selection.$from.marks().find((m) => m.type.name === 'link')?.attrs.href as string | undefined
       const url = window.prompt('Link URL (kosongkan untuk hapus):', current ?? 'https://')
       if (url === null) return true
-      const mark = view.state.schema.marks.link
-      toggleMark(mark, url.trim() === '' || url.trim() === 'https://' ? null : { href: url.trim(), title: null })(view.state, view.dispatch)
+      const trimmed = url.trim()
+      if (trimmed === '' || trimmed === 'https://') {
+        toggleMark(mark, null)(view.state, view.dispatch)
+      } else {
+        // Block dangerous URI schemes (XSS prevention)
+        try {
+          const parsed = new URL(trimmed)
+          const allowedSchemes = ['http:', 'https:', 'mailto:', 'tel:']
+          if (!allowedSchemes.includes(parsed.protocol)) {
+            window.prompt('Only http, https, mailto, and tel links are allowed.')
+            view.focus()
+            return true
+          }
+        } catch {
+          // Not a valid URL — treat as relative path
+        }
+        toggleMark(mark, { href: trimmed, title: null })(view.state, view.dispatch)
+      }
       view.focus()
       return true
     }
