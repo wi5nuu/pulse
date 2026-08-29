@@ -75,8 +75,12 @@ export default function WorkspaceSettingsPage() {
         role: inviteRole,
       })
       const link = `${window.location.origin}/invite/${data.invite.token}`
-      await navigator.clipboard.writeText(link)
-      toast.success('Invite link copied to clipboard!')
+      try {
+        await navigator.clipboard.writeText(link)
+        toast.success('Invite link copied to clipboard!')
+      } catch {
+        toast.success('Invite created! Copy the link from the invitations tab.')
+      }
       setInviteEmail('')
       // Reload invites if on invites tab
       if (activeTab === 'invites') {
@@ -127,8 +131,12 @@ export default function WorkspaceSettingsPage() {
 
   const handleCopyInviteLink = async (token: string) => {
     const link = `${window.location.origin}/invite/${token}`
-    await navigator.clipboard.writeText(link)
-    toast.success('Invite link copied to clipboard!')
+    try {
+      await navigator.clipboard.writeText(link)
+      toast.success('Invite link copied to clipboard!')
+    } catch {
+      toast.error('Failed to copy link')
+    }
   }
 
   const formatDate = (dateString: string) => {
