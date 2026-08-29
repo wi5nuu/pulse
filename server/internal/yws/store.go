@@ -405,7 +405,12 @@ func (d *Document) ConnectionCount() int {
 // Mencegah memory leak saat dokumen dibuka sekali lalu ditinggalkan.
 // Dipanggil oleh handler setelah RemoveConnection.
 func (s *Store) MaybeEvict(docID uuid.UUID) {
-	d := s.GetOrCreate(docID)
+	s.mu.RLock()
+	d, ok := s.docs[docID]
+	s.mu.RUnlock()
+	if !ok {
+		return
+	}
 
 	d.mu.RLock()
 	empty := len(d.connections) == 0
