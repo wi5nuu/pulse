@@ -89,7 +89,7 @@ func (h *DocumentShareHandlers) ShareDocument(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusCreated, map[string]any{"ok": true})
 }
 
 // UnshareDocument removes document share access
