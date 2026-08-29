@@ -129,13 +129,9 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// For document shares, use the permission (view/edit).
 	// For workspace members, use the role (owner/editor/viewer).
 	role := permission
-	if !usedLinkShare && permission != "view" && permission != "edit" {
-		// This is a workspace role (owner/editor/viewer), keep as-is
-		role = permission
-	}
-	// Validate link share permission: "view" should be read-only
-	if usedLinkShare && permission == "view" {
-		role = "view"
+	// Normalize: ensure role is always one of the known values.
+	if role != "owner" && role != "editor" && role != "viewer" && role != "view" && role != "edit" {
+		role = "viewer" // safe default
 	}
 
 	// 4. Upgrade ke WebSocket.
