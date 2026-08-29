@@ -39,10 +39,23 @@ export function InviteNotifications() {
     return () => clearInterval(interval)
   }, [fetchInvites])
 
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    if (!showDropdown) return
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement
+      if (!target.closest('[data-invite-dropdown]')) {
+        setShowDropdown(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showDropdown])
+
   const count = invites.length
 
   return (
-    <div className="relative">
+    <div className="relative" data-invite-dropdown>
       <button
         onClick={() => setShowDropdown(!showDropdown)}
         className="relative p-2 text-gray-600 hover:text-gray-900 focus:outline-none"
