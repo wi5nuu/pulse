@@ -57,7 +57,7 @@ export default function BoardPage() {
   const loadBoard = useCallback(async () => {
     try {
       const data = await apiGet<{ columns: Column[]; tasks: Task[] }>(`/api/boards/${boardId}`)
-      setColumns(data.columns.sort((a, b) => a.position - b.position))
+      setColumns([...data.columns].sort((a, b) => a.position - b.position))
       setTasks(data.tasks)
     } catch (err: any) {
       toast.error(err.message)
