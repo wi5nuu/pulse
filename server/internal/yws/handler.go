@@ -104,9 +104,14 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if lsToken != "" && h.comRepo != nil {
 			ls, err := h.comRepo.GetByToken(r.Context(), lsToken)
 			if err == nil && ls.DocumentID == docID {
-				hasAccess = true
-				permission = ls.Permission
-				usedLinkShare = true
+				// Validate link share permission: only "view" or "edit" are allowed.
+				if ls.Permission != "view" && ls.Permission != "edit" {
+					h.logger.Warn("invalid link share permission", "permission", ls.Permission, "doc", docID)
+				} else {
+					hasAccess = true
+					permission = ls.Permission
+					usedLinkShare = true
+				}
 			}
 		}
 	}
