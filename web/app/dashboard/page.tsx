@@ -56,7 +56,11 @@ export default function DashboardPage() {
   }
 
   const handleLogout = async () => {
-    await logout()
+    try {
+      await logout()
+    } catch {
+      // Even if server call fails, clear local state and redirect
+    }
     clear()
     router.push('/login')
   }
